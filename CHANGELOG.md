@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-05-18
+
 ### Changed
 - No automatic query on launch. The app opens instantly to a "set your
   filters and click Run Query" state so you can choose the time range
@@ -68,7 +70,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.0...v1.0.1
