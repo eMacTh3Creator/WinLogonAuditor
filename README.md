@@ -1,7 +1,9 @@
 <h1 align="center">WinLogonAuditor</h1>
 
 <p align="center">
-  <a href="https://emacth3creator.github.io/WinLogonAuditor/"><b>🌐 View the live site &amp; full feature tour →</b></a>
+  <a href="https://github.com/eMacTh3Creator/WinLogonAuditor/releases/latest/download/WinLogonAuditor.exe"><b>⬇ Download the .exe</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://emacth3creator.github.io/WinLogonAuditor/"><b>🌐 Live site &amp; feature tour</b></a>
 </p>
 
 <p align="center">
@@ -64,12 +66,25 @@ time ranges, a lockout-source tracer and a logout analyzer.
 
 ## Quick start
 
+**Option A — installable exe (easiest):**
+
+```text
+1. Download WinLogonAuditor.exe from the latest release.
+2. Right-click it -> Run as administrator.
+3. It auto-discovers your DCs and queries them; pick a range, Run Query.
+```
+
+**Option B — run the script directly (no download of a binary):**
+
 ```text
 1. Copy the WinLogonAuditor folder to your DC or a domain-joined admin machine.
 2. Right-click  Run-WinLogonAuditor.cmd  ->  Run as administrator
    (administrator / "Event Log Readers" is required to read the Security log).
 3. Set "Target" to your DC name (e.g. DC01), pick a time range, click Run Query.
 ```
+
+> The exe is generated from `src/WinLogonAuditor.ps1` via `build/Build-Exe.ps1`
+> and rebuilt automatically on every `v*` tag — the script is the source of truth.
 
 ### Investigating the "users keep getting logged out" issue
 
