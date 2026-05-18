@@ -1,4 +1,16 @@
-# WinLogonAuditor
+<h1 align="center">WinLogonAuditor</h1>
+
+<p align="center">
+  <a href="https://emacth3creator.github.io/WinLogonAuditor/"><b>🌐 View the live site &amp; full feature tour →</b></a>
+</p>
+
+<p align="center">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3b82f6">
+  <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-5.1%20%7C%207%2B-7c5cff">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-0a66c2">
+  <img alt="Build step" src="https://img.shields.io/badge/build-none%20required-34d399">
+  <a href="https://github.com/eMacTh3Creator/WinLogonAuditor/actions"><img alt="Pages" src="https://img.shields.io/github/actions/workflow/status/eMacTh3Creator/WinLogonAuditor/pages.yml?label=pages"></a>
+</p>
 
 A clean, fully-functional Windows desktop tool for auditing **logon failures,
 successful logons ("approvals"), account lockouts and unexpected logoffs** on a
