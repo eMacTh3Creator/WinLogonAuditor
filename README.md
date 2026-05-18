@@ -1,0 +1,121 @@
+# WinLogonAuditor
+
+A clean, fully-functional Windows desktop tool for auditing **logon failures,
+successful logons ("approvals"), account lockouts and unexpected logoffs** on a
+domain controller or any domain-joined machine.
+
+Built for the exact situation of *"users are getting logged out and I need to
+know why, right now"* — full searchable event list, per-user search, flexible
+time ranges, a lockout-source tracer and a logout analyzer.
+
+> Single-file PowerShell + WPF app. **No build step, no install, no .NET SDK.**
+> Runs on Windows PowerShell 5.1 or PowerShell 7+.
+
+---
+
+## Features
+
+- **Full event list** — one searchable, sortable grid across the Security *and*
+  System logs.
+- **Decoded, human-readable** — logon types, NTSTATUS/SubStatus failure reasons
+  and Kerberos failure codes are translated to plain English (no more
+  `0xC000006A` guessing).
+- **Search by user** — wildcards supported (`jsmith`, `svc-*`, `*admin*`).
+- **Flexible timeframe** — presets (1h / 8h / 24h / 3d / 7d) or a custom
+  from/to date range.
+- **Category filters** — failed logons (4625), successful logons (4624),
+  lockouts (4740), unlocks (4767), logoff/sign-out (4634/4647), RDP
+  connect/disconnect (4778/4779), workstation lock/unlock (4800/4801),
+  Kerberos (4768/4769/4771), NTLM (4776), explicit credentials (4648),
+  reboots/shutdowns (1074/6005/6006/6008/41).
+- **Lockout Investigator** — enter a locked username and it traces the **4740
+  caller computer** plus the correlated failed logons so you can find the device
+  holding the stale credential.
+- **Logout Analyzer** — groups logoff/disconnect/lock/lockout/reboot activity by
+  user and suggests the **likely cause** (mass reboot, lockout storm, RDP idle
+  timeout, screensaver/lock GPO, normal sign-out).
+- **Summary dashboard** — counts by category, top users by failures, top source
+  hosts/IPs by failures.
+- **Remote & local** — query the local box or point at a DC by name; optional
+  alternate credentials.
+- **Detail pane** — full raw event message for any selected row.
+- **CSV export** and **60-second auto-refresh**.
+- **Headless CLI mode** for scripting / scheduled triage.
+
+---
+
+## Quick start
+
+```text
+1. Copy the WinLogonAuditor folder to your DC or a domain-joined admin machine.
+2. Right-click  Run-WinLogonAuditor.cmd  ->  Run as administrator
+   (administrator / "Event Log Readers" is required to read the Security log).
+3. Set "Target" to your DC name (e.g. DC01), pick a time range, click Run Query.
+```
+
+### Investigating the "users keep getting logged out" issue
+
+1. Set **Target** to the domain controller.
+2. Range = **Last 24 hours**, leave categories at their defaults, **Run Query**.
+3. Open the **Logout Analyzer** tab — scan the *Likely cause* column for
+   lockout storms, mass reboots or RDP idle-timeout patterns.
+4. For any locked user, open **Lockout Investigator**, type the username and
+   **Trace lockout source** — it shows the caller computer from event 4740 and
+   the last failed-logon source host/IP.
+
+### CLI / scheduled triage
+
+```powershell
+.\src\WinLogonAuditor.ps1 -Cli -Target DC01 -User jsmith -Hours 48 -OutFile triage.csv
+```
+
+---
+
+## Requirements
+
+| Item | Detail |
+|------|--------|
+| OS | Windows 10/11 or Windows Server (incl. domain controllers) |
+| PowerShell | Windows PowerShell 5.1 **or** PowerShell 7+ |
+| Rights | Local admin **or** member of **Event Log Readers** on the target |
+| Remote | "Remote Event Log Management" allowed through the firewall on the DC |
+
+No .NET SDK, no compilation, no third-party modules.
+
+---
+
+## Event ID reference
+
+| ID | Meaning | Log |
+|----|---------|-----|
+| 4624 | Successful logon | Security |
+| 4625 | Failed logon | Security |
+| 4634 / 4647 | Logoff / user-initiated sign-out | Security |
+| 4648 | Logon with explicit credentials | Security |
+| 4740 | **Account lockout** (caller computer = source) | Security |
+| 4767 | Account unlocked | Security |
+| 4768 / 4769 / 4771 | Kerberos TGT / service ticket / pre-auth failed | Security |
+| 4776 | NTLM credential validation | Security |
+| 4778 / 4779 | Session reconnected / disconnected (RDP) | Security |
+| 4800 / 4801 | Workstation locked / unlocked | Security |
+| 1074 / 6006 / 6005 | Shutdown-restart / clean stop / boot | System |
+| 6008 / 41 | **Unexpected** shutdown / kernel-power crash | System |
+
+---
+
+## Self-test
+
+```powershell
+# structural smoke test (no desktop session needed)
+powershell.exe -Sta -File .\src\WinLogonAuditor.ps1 -NoShow
+```
+
+## Security & privacy
+
+- Read-only. The tool never modifies accounts, GPOs or the event log.
+- Exported CSVs may contain usernames/IPs from your environment and are
+  `.gitignore`d by default — do not commit them.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

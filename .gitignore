@@ -1,0 +1,10 @@
+# Exported audit data - may contain usernames / IPs from your environment
+*.csv
+WinLogonAuditor_*.csv
+
+# Editor / OS noise
+.vs/
+*.user
+Thumbs.db
+desktop.ini
+*.log
