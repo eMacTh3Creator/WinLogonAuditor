@@ -384,8 +384,11 @@ if ($Cli) {
 
 #region ----------------------------------------------------------------- WPF UI
 
-# Relaunch in STA if needed (WPF requires single-threaded apartment)
-if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+# Relaunch in STA if needed (WPF requires single-threaded apartment).
+# Skipped when packaged as an .exe (PS2EXE already runs STA and there is no
+# .ps1 to relaunch) - guarded by the $PSCommandPath check.
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA' -and
+    $PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
     $exe = (Get-Process -Id $PID).Path
     & $exe -NoProfile -ExecutionPolicy Bypass -Sta -File $PSCommandPath @PSBoundParameters
     return

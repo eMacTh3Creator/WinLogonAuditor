@@ -1,0 +1,46 @@
+name: Build & Release EXE
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build (e.g. 1.0.0)
+        required: true
+        default: 1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF -replace '^refs/tags/v','' }
+               else { '${{ github.event.inputs.version }}' }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build exe
+        shell: pwsh
+        run: ./build/Build-Exe.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Create / update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v${{ steps.ver.outputs.version }}"
+          if (-not (gh release view $tag 2>$null)) {
+            gh release create $tag dist/WinLogonAuditor.exe `
+              --title "WinLogonAuditor $tag" `
+              --notes "Standalone GUI build of WinLogonAuditor. Right-click the exe and Run as administrator (needed to read the Security log). Built from src/WinLogonAuditor.ps1."
+          } else {
+            gh release upload $tag dist/WinLogonAuditor.exe --clobber
+          }

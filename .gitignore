@@ -2,6 +2,10 @@
 *.csv
 WinLogonAuditor_*.csv
 
+# Built binaries - shipped via GitHub Releases, not committed
+dist/
+*.exe
+
 # Editor / OS noise
 .vs/
 *.user
