@@ -309,7 +309,7 @@ $Script:ConfigDir  = Join-Path $env:APPDATA 'WinLogonAuditor'
 $Script:ConfigPath = Join-Path $Script:ConfigDir 'config.json'
 
 function Get-AuditConfig {
-    $def = [pscustomobject]@{ Servers = @(); LastTarget = ''; QueryAllDcs = $false }
+    $def = [pscustomobject]@{ Servers = @(); LastTarget = ''; QueryAllDcs = $true }
     try {
         if (Test-Path $Script:ConfigPath) {
             $c = Get-Content $Script:ConfigPath -Raw | ConvertFrom-Json
