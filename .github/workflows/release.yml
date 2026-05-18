@@ -31,6 +31,21 @@ jobs:
         shell: pwsh
         run: ./build/Build-Exe.ps1 -Version ${{ steps.ver.outputs.version }}
 
+      - name: Build release notes from CHANGELOG
+        id: notes
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $body = ''
+          if (Test-Path CHANGELOG.md) {
+            $raw = Get-Content CHANGELOG.md -Raw
+            $m = [regex]::Match($raw, "(?s)##\s*\[$([regex]::Escape($v))\][^\n]*\n(.*?)(?=\r?\n##\s*\[|\r?\n\[Unreleased\]:)")
+            if ($m.Success) { $body = $m.Groups[1].Value.Trim() }
+          }
+          $footer = "`n`n---`nStandalone GUI build. Right-click ``WinLogonAuditor.exe`` and **Run as administrator** (needed to read the Security log). Unsigned: SmartScreen -> More info -> Run anyway. Built from ``src/WinLogonAuditor.ps1``."
+          if (-not $body) { $body = "Standalone GUI build of WinLogonAuditor $v." }
+          Set-Content release-notes.md -Value ($body + $footer) -Encoding UTF8
+
       - name: Create / update GitHub Release
         shell: pwsh
         env:
@@ -40,7 +55,8 @@ jobs:
           if (-not (gh release view $tag 2>$null)) {
             gh release create $tag dist/WinLogonAuditor.exe `
               --title "WinLogonAuditor $tag" `
-              --notes "Standalone GUI build of WinLogonAuditor. Right-click the exe and Run as administrator (needed to read the Security log). Built from src/WinLogonAuditor.ps1."
+              --notes-file release-notes.md
           } else {
+            gh release edit $tag --notes-file release-notes.md
             gh release upload $tag dist/WinLogonAuditor.exe --clobber
           }

@@ -145,6 +145,27 @@ No .NET SDK, no compilation, no third-party modules.
 powershell.exe -Sta -File .\src\WinLogonAuditor.ps1 -NoShow
 ```
 
+## Releasing a new version
+
+The `.ps1` is the source of truth; the exe and GitHub Release are generated.
+
+1. Add what changed under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+2. Run one command:
+
+   ```powershell
+   pwsh -File build\New-Release.ps1 -Bump minor     # or -Bump patch|major
+   # or pin an exact version:
+   pwsh -File build\New-Release.ps1 -Version 1.2.0
+   ```
+
+That rolls the changelog, commits, creates the `vX.Y.Z` tag and pushes it.
+The **Build & Release EXE** workflow then rebuilds `WinLogonAuditor.exe` from
+the current script and publishes the release with this version's changelog as
+the notes. The site/README "Download" links always point at the latest release,
+so nothing else needs editing.
+
+See the full history in [CHANGELOG.md](CHANGELOG.md).
+
 ## Security & privacy
 
 - Read-only. The tool never modifies accounts, GPOs or the event log.
