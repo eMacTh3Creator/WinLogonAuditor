@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-05-18
+
 ### Changed
 - UI no longer freezes (stuck hourglass) when querying. Domain-controller
   discovery and **all** result aggregation (summary tabs + Logout Analyzer)
@@ -42,7 +44,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/eMacTh3Creator/WinLogonAuditor/releases/tag/v1.0.0
 
