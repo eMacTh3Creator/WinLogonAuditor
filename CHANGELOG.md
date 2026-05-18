@@ -6,6 +6,21 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Lockout source attribution. Event 4740 frequently has no Caller
+  Computer Name for NTLM/network lockouts (a Windows logging behaviour,
+  not a tool fault). Each such 4740 is now correlated to the matching
+  4625/4776/4771 for the same user within 5 minutes, and its row is
+  rewritten to "Locked via IP <x> | Type <n> | <auth pkg> | proc <p>
+  (from event NNNN, Ns before)" with the source IP/host filled in.
+- 4625 rows now show logon type, authentication package and process;
+  4776 rows surface the NTLM Source Workstation (often the real
+  machine when 4740 is blank).
+- Best-effort reverse DNS so a bare source IP resolves to a hostname.
+- Lockout Investigator now prints a one-line VERDICT: lock count, the
+  top offending source host/IP and how to act, with a hint to enable
+  4625/4776 when they aren't in the data.
+
 ## [1.0.5] - 2026-05-18
 
 ### Fixed

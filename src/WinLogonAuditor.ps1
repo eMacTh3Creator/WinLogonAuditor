@@ -217,18 +217,47 @@ function ConvertTo-AuditRow {
     $srcIp = $data['IpAddress']
     if ($srcIp -in @('-','::1','127.0.0.1')) { $srcIp = "$srcIp (local)" }
 
+    # Extra auth context (key for "what is locking the account")
+    $authPkg  = $data['AuthenticationPackageName']
+    $logonProc= $data['LogonProcessName']
+    $proc     = $data['ProcessName']
+    if (-not $proc) { $proc = $data['CallerProcessName'] }
+
+    # 4776 (NTLM validation on the DC) carries the *source workstation* name,
+    # which is frequently the real machine when 4740 has no caller computer.
+    if ($id -eq 4776) {
+        $wks = $data['Workstation']
+        if ($wks -and $wks -ne '-' -and -not $srcHost) { $srcHost = $wks }
+        if (-not $user) { $user = $data['TargetUserName'] }
+    }
+
     # Reason / decoded detail
     $reason = ''
     switch ($id) {
         4625 {
             $st  = Get-DecodedStatus $data['Status']
             $sub = Get-DecodedStatus $data['SubStatus']
-            $reason = if ($sub -and $sub -ne '0x0') { $sub } else { $st }
+            $why = if ($sub -and $sub -ne '0x0') { $sub } else { $st }
+            $bits = @($why)
+            $lt = Get-DecodedLogonType $data['LogonType']; if ($lt) { $bits += "Type $lt" }
+            if ($authPkg) { $bits += $authPkg }
+            if ($proc -and $proc -ne '-') { $bits += "proc $proc" }
+            $reason = ($bits -join '  |  ')
         }
         4771 { $reason = Get-DecodedKerb $data['Failure'] ; if (-not $reason) { $reason = Get-DecodedKerb $data['FailureCode'] } }
         4768 { if ($data['Status'] -and $data['Status'] -ne '0x0') { $reason = Get-DecodedKerb $data['Status'] } }
-        4776 { if ($data['Status'] -and $data['Status'] -ne '0x0') { $reason = Get-DecodedStatus $data['Status'] } }
-        4740 { $reason = "Locked by: $($data['CallerComputerName'])" }
+        4776 {
+            $w = $data['Workstation']
+            if ($data['Status'] -and $data['Status'] -ne '0x0') {
+                $reason = "NTLM FAILED ($(Get-DecodedStatus $data['Status']))"
+            } else { $reason = 'NTLM validated' }
+            if ($w -and $w -ne '-') { $reason += "  |  from workstation $w" }
+        }
+        4740 {
+            $cc = $data['CallerComputerName']
+            $reason = if ($cc -and $cc -ne '-') { "Locked by: $cc" }
+                      else { 'Locked out - caller not in 4740 (NTLM/network); see correlated source' }
+        }
         4634 { $reason = Get-DecodedLogonType $data['LogonType'] }
         4647 { $reason = 'User initiated sign-out' }
     }
@@ -248,7 +277,9 @@ function ConvertTo-AuditRow {
         LogonType   = $logonType
         Reason      = $reason
         LoggedOn    = $Evt.MachineName
-        Process     = $data['ProcessName']
+        Process     = $proc
+        AuthPkg     = $authPkg
+        LogonProc   = $logonProc
         CallerComp  = $data['CallerComputerName']
         Message     = ($Evt.FormatDescription())
     }
@@ -865,6 +896,57 @@ function Start-Audit {
             $sync.Status = "Sorting & summarising $($all.Count) events..."
             $sync.Prog   = 96
             $rows = @($all | Sort-Object Time -Descending)
+
+            # --- Correlate 4740 lockouts to what actually locked them ---
+            # Windows often logs 4740 with no Caller Computer Name for
+            # NTLM/network lockouts. The real source is the bad-password
+            # 4625 / 4776 / 4771 for the same user moments earlier.
+            $srcByUser = @{}
+            foreach ($x in $rows) {
+                if ($x.EventId -in 4625,4776,4771 -and $x.User) {
+                    $k = $x.User.ToLower()
+                    if (-not $srcByUser.ContainsKey($k)) { $srcByUser[$k] = New-Object System.Collections.Generic.List[object] }
+                    $srcByUser[$k].Add($x)
+                }
+            }
+            foreach ($x in $rows) {
+                if ($x.EventId -ne 4740 -or -not $x.User) { continue }
+                if ($x.CallerComp -and $x.CallerComp -ne '-') { continue }
+                $cands = $srcByUser[$x.User.ToLower()]
+                if (-not $cands) { continue }
+                $best = $null; $bestDiff = [double]::MaxValue
+                foreach ($c in $cands) {
+                    $diff = [math]::Abs(($x.Time - $c.Time).TotalSeconds)
+                    if ($diff -le 300 -and $diff -lt $bestDiff) { $best = $c; $bestDiff = $diff }
+                }
+                if ($best) {
+                    if (-not $x.SourceIP)   { $x.SourceIP   = $best.SourceIP }
+                    if (-not $x.SourceHost) { $x.SourceHost = $best.SourceHost }
+                    $loc = @()
+                    if ($best.SourceHost) { $loc += "host $($best.SourceHost)" }
+                    if ($best.SourceIP)   { $loc += "IP $($best.SourceIP)" }
+                    if ($best.LogonType)  { $loc += "Type $($best.LogonType)" }
+                    if ($best.AuthPkg)    { $loc += $best.AuthPkg }
+                    if ($best.Process -and $best.Process -ne '-') { $loc += "proc $($best.Process)" }
+                    $secAgo = [int]$bestDiff
+                    $x.Reason = "Locked via " + ($loc -join '  |  ') + "  (from event $($best.EventId), ${secAgo}s before)"
+                }
+            }
+
+            # --- Best-effort reverse DNS for source IPs (cached) ---
+            $dnsCache = @{}
+            foreach ($x in $rows) {
+                $ip = "$($x.SourceIP)"
+                if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$' -and -not $x.SourceHost) {
+                    if (-not $dnsCache.ContainsKey($ip)) {
+                        $h = $null
+                        try { $h = [System.Net.Dns]::GetHostEntry($ip).HostName } catch {}
+                        $dnsCache[$ip] = $h
+                    }
+                    if ($dnsCache[$ip]) { $x.SourceHost = $dnsCache[$ip] }
+                }
+            }
+
             $sync.Rows = $rows
             if ($errs -and $all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
 
@@ -1052,11 +1134,33 @@ $Script:ctl.BtnLockGo.Add_Click({
         $_.User -like "*$u*" -and $_.EventId -in 4740,4625,4771,4768,4776,4624
     } | Sort-Object Time -Descending
     $Script:ctl.GridLock.ItemsSource = @($rows)
-    $src = ($rows | Where-Object EventId -eq 4740 | Select-Object -First 1).Reason
-    $lastFail = ($rows | Where-Object EventId -in 4625,4771 | Select-Object -First 1)
-    $msg = if ($src) { "Most recent lockout -> $src." } else { "No 4740 in current data (widen range / query the DC)." }
-    if ($lastFail) { $msg += "  Last failure from host '$($lastFail.SourceHost)' IP '$($lastFail.SourceIP)': $($lastFail.Reason)" }
-    $Script:ctl.TxtLockInfo.Text = $msg
+    $locks = @($rows | Where-Object EventId -eq 4740)
+    $fails = @($rows | Where-Object EventId -in 4625,4771,4776)
+    if (-not $locks) {
+        $Script:ctl.TxtLockInfo.Text = "No 4740 for '*$u*' in current data. Tick 'Account lockouts (4740)' and widen the range, then Run Query."
+        return
+    }
+    # Where are the bad attempts coming from? Rank sources.
+    $srcGroups = $fails | ForEach-Object {
+        if ($_.SourceHost) { $_.SourceHost } elseif ($_.SourceIP) { $_.SourceIP } else { '(unknown)' }
+    } | Group-Object | Sort-Object Count -Descending
+    $top = $srcGroups | Select-Object -First 1
+    $lastLock = $locks | Select-Object -First 1
+    $lastFail = $fails | Select-Object -First 1
+    $verdict = "VERDICT: '$u' locked $($locks.Count)x. "
+    if ($top) {
+        $verdict += "Bad attempts come mainly from $($top.Name) ($($top.Count) hits"
+        if ($lastFail) {
+            if ($lastFail.LogonType) { $verdict += ", $($lastFail.LogonType)" }
+            if ($lastFail.AuthPkg)   { $verdict += ", $($lastFail.AuthPkg)" }
+            if ($lastFail.Process -and $lastFail.Process -ne '-') { $verdict += ", proc $($lastFail.Process)" }
+        }
+        $verdict += "). Investigate that host/service (stale creds: mapped drive, service, scheduled task, RDP, cached password)."
+    } else {
+        $verdict += "No 4625/4776/4771 in current data - tick 'Failed logons (4625)' and 'NTLM validation (4776)', then Run Query to reveal the source."
+    }
+    $verdict += "  Most recent lockout: $($lastLock.Reason)"
+    $Script:ctl.TxtLockInfo.Text = $verdict
 })
 
 # Poll the runspace
