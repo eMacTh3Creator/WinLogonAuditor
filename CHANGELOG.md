@@ -6,6 +6,13 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Crash on Run Query in the packaged .exe ("The property 'Cursor' cannot be
+  found on this object"): window/control references are now explicitly
+  script-scoped for the PS2EXE runtime, the busy cursor is non-fatal, and
+  all query paths are wrapped so an unexpected error is shown in the status
+  bar / a dismissible dialog instead of terminating the app.
+
 ## [1.0.0] - 2026-05-18
 
 ### Added

@@ -576,13 +576,13 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 "@
 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
-$Win    = [Windows.Markup.XamlReader]::Load($reader)
+$Script:Win    = [Windows.Markup.XamlReader]::Load($reader)
 
 # Resolve named controls
-$ctl = @{}
+$Script:ctl = @{}
 $xaml.SelectNodes("//*[@*[local-name()='Name']]") | ForEach-Object {
     $n = $_.Attributes['x:Name'].Value
-    if ($n) { $ctl[$n] = $Win.FindName($n) }
+    if ($n) { $Script:ctl[$n] = $Script:Win.FindName($n) }
 }
 
 # Build category checkboxes
@@ -593,8 +593,34 @@ foreach ($g in $Script:Groups.GetEnumerator()) {
     $cb.IsChecked = $true
     $cb.Tag       = $g.Value
     $cb.Foreground = 'White'
-    $ctl.PnlCats.Children.Add($cb) | Out-Null
+    $Script:ctl.PnlCats.Children.Add($cb) | Out-Null
     $Script:CatBoxes += $cb
+}
+
+# Busy-state helper. The wait cursor is cosmetic only, so a failure here must
+# never abort a query (PS2EXE-packaged scope can make this throw).
+function Set-Busy {
+    param([bool]$On)
+    try {
+        if ($Script:Win) {
+            $Script:Win.Cursor = if ($On) { [System.Windows.Input.Cursors]::Wait } else { $null }
+        }
+    } catch {}
+}
+
+# Run a UI action so no exception can reach the PS2EXE fatal dialog; surface
+# it in the status bar and a non-fatal message box, and clear busy state.
+function Invoke-Safe {
+    param([scriptblock]$Action, [string]$What = 'Operation')
+    try { & $Action }
+    catch {
+        Set-Busy $false
+        try { $Script:Sync.Running = $false } catch {}
+        try { $Script:ctl.BtnQuery.IsEnabled = $true } catch {}
+        $m = "{0} failed: {1}" -f $What, $_.Exception.Message
+        try { $Script:ctl.TxtStatus.Text = $m } catch {}
+        try { [System.Windows.MessageBox]::Show($m,'WinLogonAuditor','OK','Warning') | Out-Null } catch {}
+    }
 }
 
 # Load saved config and populate the target dropdown
@@ -602,13 +628,13 @@ $Script:Config = Get-AuditConfig
 
 function Update-TargetList {
     param([string]$Select)
-    $cur = if ($Select) { $Select } else { $ctl.CmbTarget.Text }
+    $cur = if ($Select) { $Select } else { $Script:ctl.CmbTarget.Text }
     $list = New-Object System.Collections.Generic.List[string]
     $list.Add($env:COMPUTERNAME)
     if ($env:LOGONSERVER) { $list.Add(($env:LOGONSERVER -replace '^\\\\','')) }
     foreach ($s in @($Script:Config.Servers)) { if ($s -and -not $list.Contains($s)) { $list.Add($s) } }
-    $ctl.CmbTarget.ItemsSource = @($list | Select-Object -Unique)
-    if ($cur) { $ctl.CmbTarget.Text = $cur }
+    $Script:ctl.CmbTarget.ItemsSource = @($list | Select-Object -Unique)
+    if ($cur) { $Script:ctl.CmbTarget.Text = $cur }
 }
 
 Update-TargetList
@@ -616,8 +642,8 @@ $initialTarget = if ($Script:Config.LastTarget) { $Script:Config.LastTarget }
                  elseif ($Target -and $Target -ne $env:COMPUTERNAME) { $Target }
                  elseif ($env:LOGONSERVER) { $env:LOGONSERVER -replace '^\\\\','' }
                  else { $env:COMPUTERNAME }
-$ctl.CmbTarget.Text  = $initialTarget
-$ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
+$Script:ctl.CmbTarget.Text  = $initialTarget
+$Script:ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
 
 # Shared state for the background runspace
 $Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Error=$null })
@@ -631,15 +657,15 @@ function Get-SelectedIds {
 
 function Get-TimeWindow {
     $now = Get-Date
-    switch ($ctl.CmbRange.SelectedIndex) {
+    switch ($Script:ctl.CmbRange.SelectedIndex) {
         0 { return @($now.AddHours(-1),  $now) }
         1 { return @($now.AddHours(-8),  $now) }
         2 { return @($now.AddHours(-24), $now) }
         3 { return @($now.AddDays(-3),   $now) }
         4 { return @($now.AddDays(-7),   $now) }
         5 {
-            $f = if ($ctl.DtFrom.SelectedDate) { $ctl.DtFrom.SelectedDate } else { $now.AddDays(-1) }
-            $t = if ($ctl.DtTo.SelectedDate)   { ([datetime]$ctl.DtTo.SelectedDate).AddDays(1).AddSeconds(-1) } else { $now }
+            $f = if ($Script:ctl.DtFrom.SelectedDate) { $Script:ctl.DtFrom.SelectedDate } else { $now.AddDays(-1) }
+            $t = if ($Script:ctl.DtTo.SelectedDate)   { ([datetime]$Script:ctl.DtTo.SelectedDate).AddDays(1).AddSeconds(-1) } else { $now }
             return @($f, $t)
         }
         default { return @($now.AddHours(-24), $now) }
@@ -651,33 +677,33 @@ $Script:Cred = $null
 function Start-Audit {
     if ($Script:Sync.Running) { return }
     $ids = Get-SelectedIds
-    if (-not $ids) { $ctl.TxtStatus.Text = 'Select at least one category.'; return }
+    if (-not $ids) { $Script:ctl.TxtStatus.Text = 'Select at least one category.'; return }
     $win = Get-TimeWindow
 
-    if ($ctl.ChkCred.IsChecked -and -not $Script:Cred) {
+    if ($Script:ctl.ChkCred.IsChecked -and -not $Script:Cred) {
         $Script:Cred = Get-Credential -Message "Domain credentials for querying / DC discovery"
     }
-    if (-not $ctl.ChkCred.IsChecked) { $Script:Cred = $null }
+    if (-not $Script:ctl.ChkCred.IsChecked) { $Script:Cred = $null }
 
-    $maxN = 5000; [int]::TryParse($ctl.TxtMax.Text, [ref]$maxN) | Out-Null
+    $maxN = 5000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
 
     # Resolve target(s): one typed host, or every discovered DC.
-    if ($ctl.ChkAllDc.IsChecked) {
-        $ctl.TxtStatus.Text = 'Discovering domain controllers...'
+    if ($Script:ctl.ChkAllDc.IsChecked) {
+        $Script:ctl.TxtStatus.Text = 'Discovering domain controllers...'
         $dc = Get-DomainControllerList -Credential $Script:Cred
         if ($dc.Error -or -not $dc.DCs) {
-            $ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"; return
+            $Script:ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"; return
         }
         $targets = @($dc.DCs)
     } else {
-        $t = $ctl.CmbTarget.Text.Trim()
-        if (-not $t) { $ctl.TxtStatus.Text = 'Enter or pick a target server.'; return }
+        $t = $Script:ctl.CmbTarget.Text.Trim()
+        if (-not $t) { $Script:ctl.TxtStatus.Text = 'Enter or pick a target server.'; return }
         $targets = @($t)
     }
 
     # Persist selection
-    $Script:Config.LastTarget  = $ctl.CmbTarget.Text.Trim()
-    $Script:Config.QueryAllDcs = [bool]$ctl.ChkAllDc.IsChecked
+    $Script:Config.LastTarget  = $Script:ctl.CmbTarget.Text.Trim()
+    $Script:Config.QueryAllDcs = [bool]$Script:ctl.ChkAllDc.IsChecked
     Save-AuditConfig $Script:Config
 
     $qargs = @{
@@ -685,7 +711,7 @@ function Start-Audit {
         EventIds   = $ids
         Start      = $win[0]
         End        = $win[1]
-        UserFilter = $ctl.TxtUser.Text.Trim()
+        UserFilter = $Script:ctl.TxtUser.Text.Trim()
         MaxEvents  = $maxN
         Credential = $Script:Cred
     }
@@ -693,9 +719,9 @@ function Start-Audit {
     $Script:Sync.Running = $true
     $Script:Sync.Done    = $false
     $Script:Sync.Error   = $null
-    $ctl.TxtStatus.Text  = "Querying $($qargs.Targets -join ', ') ..."
-    $ctl.BtnQuery.IsEnabled = $false
-    $Win.Cursor = [System.Windows.Input.Cursors]::Wait
+    $Script:ctl.TxtStatus.Text  = "Querying $($qargs.Targets -join ', ') ..."
+    $Script:ctl.BtnQuery.IsEnabled = $false
+    Set-Busy $true
 
     $rs = [runspacefactory]::CreateRunspace()
     $rs.ApartmentState = 'STA'; $rs.ThreadOptions = 'ReuseThread'; $rs.Open()
@@ -751,14 +777,14 @@ function Update-Views {
     $Script:AllRows = @($rows)
     Apply-Filter
     # Summary - by category
-    $ctl.GridSumCat.ItemsSource = @($rows | Group-Object Category | Sort-Object Count -Descending |
+    $Script:ctl.GridSumCat.ItemsSource = @($rows | Group-Object Category | Sort-Object Count -Descending |
         ForEach-Object { [pscustomobject]@{ Name=$_.Name; Count=$_.Count } })
     # Top users by failure
-    $ctl.GridSumUser.ItemsSource = @($rows | Where-Object { $_.Result -in 'Failure','Lockout' -and $_.User } |
+    $Script:ctl.GridSumUser.ItemsSource = @($rows | Where-Object { $_.Result -in 'Failure','Lockout' -and $_.User } |
         Group-Object User | Sort-Object Count -Descending | Select-Object -First 25 |
         ForEach-Object { [pscustomobject]@{ Name=$_.Name; Count=$_.Count } })
     # Top sources by failure
-    $ctl.GridSumSrc.ItemsSource = @($rows | Where-Object { $_.Result -in 'Failure','Lockout' } |
+    $Script:ctl.GridSumSrc.ItemsSource = @($rows | Where-Object { $_.Result -in 'Failure','Lockout' } |
         ForEach-Object { if ($_.SourceHost) { $_.SourceHost } elseif ($_.SourceIP) { $_.SourceIP } else { '(unknown)' } } |
         Group-Object | Sort-Object Count -Descending | Select-Object -First 25 |
         ForEach-Object { [pscustomobject]@{ Name=$_.Name; Count=$_.Count } })
@@ -784,39 +810,39 @@ function Update-Views {
             Likely=($likely -join '  |  ')
         }
     }
-    $ctl.GridOut.ItemsSource = @($byUser | Sort-Object Last -Descending)
+    $Script:ctl.GridOut.ItemsSource = @($byUser | Sort-Object Last -Descending)
 }
 
 function Apply-Filter {
-    $f = $ctl.TxtFilter.Text
+    $f = $Script:ctl.TxtFilter.Text
     $view = $Script:AllRows
     if ($f) {
         $view = $view | Where-Object {
             "$($_.User) $($_.SourceHost) $($_.SourceIP) $($_.Category) $($_.Reason) $($_.EventId) $($_.LoggedOn)" -like "*$f*"
         }
     }
-    $ctl.Grid.ItemsSource = @($view)
-    $tgtLbl = if ($ctl.ChkAllDc.IsChecked) { 'all DCs' } else { $ctl.CmbTarget.Text }
-    $ctl.TxtStatus.Text = "{0} events  |  target {1}  |  {2}" -f @($view).Count, $tgtLbl, (Get-Date -Format 'HH:mm:ss')
+    $Script:ctl.Grid.ItemsSource = @($view)
+    $tgtLbl = if ($Script:ctl.ChkAllDc.IsChecked) { 'all DCs' } else { $Script:ctl.CmbTarget.Text }
+    $Script:ctl.TxtStatus.Text = "{0} events  |  target {1}  |  {2}" -f @($view).Count, $tgtLbl, (Get-Date -Format 'HH:mm:ss')
 }
 
 # --- Events / wiring ---
-$ctl.CmbRange.Add_SelectionChanged({
-    $custom = ($ctl.CmbRange.SelectedIndex -eq 5)
-    $ctl.DtFrom.IsEnabled = $custom; $ctl.DtTo.IsEnabled = $custom
+$Script:ctl.CmbRange.Add_SelectionChanged({
+    $custom = ($Script:ctl.CmbRange.SelectedIndex -eq 5)
+    $Script:ctl.DtFrom.IsEnabled = $custom; $Script:ctl.DtTo.IsEnabled = $custom
 })
-$ctl.BtnQuery.Add_Click({ Start-Audit })
+$Script:ctl.BtnQuery.Add_Click({ Invoke-Safe { Start-Audit } 'Query' })
 
-$ctl.BtnDiscover.Add_Click({
-    if ($ctl.ChkCred.IsChecked -and -not $Script:Cred) {
+$Script:ctl.BtnDiscover.Add_Click({
+    if ($Script:ctl.ChkCred.IsChecked -and -not $Script:Cred) {
         $Script:Cred = Get-Credential -Message "Domain credentials for DC discovery"
     }
-    $ctl.TxtStatus.Text = 'Discovering domain controllers...'
-    $Win.Cursor = [System.Windows.Input.Cursors]::Wait
+    $Script:ctl.TxtStatus.Text = 'Discovering domain controllers...'
+    Set-Busy $true
     $dc = Get-DomainControllerList -Credential $Script:Cred
-    $Win.Cursor = $null
+    Set-Busy $false
     if ($dc.Error -or -not $dc.DCs) {
-        $ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"
+        $Script:ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"
         [System.Windows.MessageBox]::Show("Could not enumerate domain controllers.`n`n$($dc.Error)`n`nTip: tick 'Alt credentials' and use a domain account, or run on a domain-joined machine.",'DC discovery','OK','Warning') | Out-Null
         return
     }
@@ -824,12 +850,12 @@ $ctl.BtnDiscover.Add_Click({
     $Script:Config.Servers = $merged
     Save-AuditConfig $Script:Config
     Update-TargetList
-    if ($dc.Pdc) { $ctl.CmbTarget.Text = $dc.Pdc }
+    if ($dc.Pdc) { $Script:ctl.CmbTarget.Text = $dc.Pdc }
     $pdcNote = if ($dc.Pdc) { "  PDC emulator: $($dc.Pdc) (best single target for lockouts)" } else { '' }
-    $ctl.TxtStatus.Text = "Found $($dc.DCs.Count) DC(s) in $($dc.Domain).$pdcNote"
+    $Script:ctl.TxtStatus.Text = "Found $($dc.DCs.Count) DC(s) in $($dc.Domain).$pdcNote"
 })
 
-$ctl.BtnManage.Add_Click({
+$Script:ctl.BtnManage.Add_Click({
     [xml]$mx = @"
 <Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
         xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
@@ -848,7 +874,7 @@ $ctl.BtnManage.Add_Click({
 </Window>
 "@
     $mw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $mx))
-    $mw.Owner = $Win
+    $mw.Owner = $Script:Win
     $lst = $mw.FindName('Lst'); $new = $mw.FindName('New')
     $servers = New-Object System.Collections.ObjectModel.ObservableCollection[string]
     foreach ($s in @($Script:Config.Servers)) { if ($s) { $servers.Add($s) } }
@@ -864,33 +890,33 @@ $ctl.BtnManage.Add_Click({
     $mw.ShowDialog() | Out-Null
 })
 
-$ctl.TxtFilter.Add_TextChanged({ Apply-Filter })
-$ctl.Grid.Add_SelectionChanged({
-    $sel = $ctl.Grid.SelectedItem
-    if ($sel) { $ctl.TxtDetail.Text = $sel.Message }
+$Script:ctl.TxtFilter.Add_TextChanged({ Apply-Filter })
+$Script:ctl.Grid.Add_SelectionChanged({
+    $sel = $Script:ctl.Grid.SelectedItem
+    if ($sel) { $Script:ctl.TxtDetail.Text = $sel.Message }
 })
-$ctl.BtnExport.Add_Click({
-    if (-not $Script:AllRows) { $ctl.TxtStatus.Text='Nothing to export - run a query first.'; return }
+$Script:ctl.BtnExport.Add_Click({
+    if (-not $Script:AllRows) { $Script:ctl.TxtStatus.Text='Nothing to export - run a query first.'; return }
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
     $dlg.Filter='CSV (*.csv)|*.csv'; $dlg.FileName="WinLogonAuditor_$(Get-Date -Format yyyyMMdd_HHmmss).csv"
     if ($dlg.ShowDialog() -eq 'OK') {
         $Script:AllRows | Select-Object TimeStr,EventId,Result,Category,User,Domain,SourceHost,SourceIP,LogonType,Reason,LoggedOn |
             Export-Csv -Path $dlg.FileName -NoTypeInformation -Encoding UTF8
-        $ctl.TxtStatus.Text = "Exported $(@($Script:AllRows).Count) rows to $($dlg.FileName)"
+        $Script:ctl.TxtStatus.Text = "Exported $(@($Script:AllRows).Count) rows to $($dlg.FileName)"
     }
 })
-$ctl.BtnLockGo.Add_Click({
-    $u = $ctl.TxtLockUser.Text.Trim()
-    if (-not $u) { $ctl.TxtLockInfo.Text='Enter a username.'; return }
+$Script:ctl.BtnLockGo.Add_Click({
+    $u = $Script:ctl.TxtLockUser.Text.Trim()
+    if (-not $u) { $Script:ctl.TxtLockInfo.Text='Enter a username.'; return }
     $rows = $Script:AllRows | Where-Object {
         $_.User -like "*$u*" -and $_.EventId -in 4740,4625,4771,4768,4776,4624
     } | Sort-Object Time -Descending
-    $ctl.GridLock.ItemsSource = @($rows)
+    $Script:ctl.GridLock.ItemsSource = @($rows)
     $src = ($rows | Where-Object EventId -eq 4740 | Select-Object -First 1).Reason
     $lastFail = ($rows | Where-Object EventId -in 4625,4771 | Select-Object -First 1)
     $msg = if ($src) { "Most recent lockout -> $src." } else { "No 4740 in current data (widen range / query the DC)." }
     if ($lastFail) { $msg += "  Last failure from host '$($lastFail.SourceHost)' IP '$($lastFail.SourceIP)': $($lastFail.Reason)" }
-    $ctl.TxtLockInfo.Text = $msg
+    $Script:ctl.TxtLockInfo.Text = $msg
 })
 
 # Poll the runspace
@@ -898,19 +924,21 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(400)
 $timer.Add_Tick({
     if ($Script:Sync.Running -and $Script:Sync.Done) {
-        try {
-            if ($Script:Sync.PS) { $Script:Sync.PS.EndInvoke($Script:Sync.Handle) | Out-Null }
-        } catch {}
-        if ($Script:Sync.Error) {
-            $ctl.TxtStatus.Text = "ERROR: $($Script:Sync.Error)"
-            [System.Windows.MessageBox]::Show($Script:Sync.Error,'Query failed','OK','Error') | Out-Null
-        } else {
-            Update-Views $Script:Sync.Rows
-        }
-        if ($Script:Sync.RS) { $Script:Sync.PS.Dispose(); $Script:Sync.RS.Close() }
+        Invoke-Safe {
+            try {
+                if ($Script:Sync.PS) { $Script:Sync.PS.EndInvoke($Script:Sync.Handle) | Out-Null }
+            } catch {}
+            if ($Script:Sync.Error) {
+                $Script:ctl.TxtStatus.Text = "ERROR: $($Script:Sync.Error)"
+                [System.Windows.MessageBox]::Show($Script:Sync.Error,'Query failed','OK','Error') | Out-Null
+            } else {
+                Update-Views $Script:Sync.Rows
+            }
+            if ($Script:Sync.RS) { $Script:Sync.PS.Dispose(); $Script:Sync.RS.Close() }
+        } 'Results'
         $Script:Sync.Running = $false
-        $ctl.BtnQuery.IsEnabled = $true
-        $Win.Cursor = $null
+        $Script:ctl.BtnQuery.IsEnabled = $true
+        Set-Busy $false
     }
 })
 $timer.Start()
@@ -918,25 +946,25 @@ $timer.Start()
 # Auto refresh
 $autoTimer = New-Object System.Windows.Threading.DispatcherTimer
 $autoTimer.Interval = [TimeSpan]::FromSeconds(60)
-$autoTimer.Add_Tick({ if ($ctl.ChkAuto.IsChecked -and -not $Script:Sync.Running) { Start-Audit } })
+$autoTimer.Add_Tick({ if ($Script:ctl.ChkAuto.IsChecked -and -not $Script:Sync.Running) { Invoke-Safe { Start-Audit } 'Auto-refresh' } })
 $autoTimer.Start()
 
-$Win.Add_Closed({
+$Script:Win.Add_Closed({
     $timer.Stop(); $autoTimer.Stop()
     try {
-        $Script:Config.LastTarget  = $ctl.CmbTarget.Text.Trim()
-        $Script:Config.QueryAllDcs = [bool]$ctl.ChkAllDc.IsChecked
+        $Script:Config.LastTarget  = $Script:ctl.CmbTarget.Text.Trim()
+        $Script:Config.QueryAllDcs = [bool]$Script:ctl.ChkAllDc.IsChecked
         Save-AuditConfig $Script:Config
     } catch {}
 })
 
 # Kick off an initial query
-$Win.Add_ContentRendered({ Start-Audit })
+$Script:Win.Add_ContentRendered({ Invoke-Safe { Start-Audit } 'Initial query' })
 
 if ($NoShow) {
-    Write-Host "SELFTEST OK: window built, $($ctl.Count) named controls resolved, $($Script:CatBoxes.Count) category filters." -ForegroundColor Green
+    Write-Host "SELFTEST OK: window built, $($Script:ctl.Count) named controls resolved, $($Script:CatBoxes.Count) category filters." -ForegroundColor Green
     return
 }
-$Win.ShowDialog() | Out-Null
+$Script:Win.ShowDialog() | Out-Null
 
 #endregion
