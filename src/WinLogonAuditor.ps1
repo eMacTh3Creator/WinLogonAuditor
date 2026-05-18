@@ -569,8 +569,30 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
       </TabItem>
     </TabControl>
 
+    <!-- Progress overlay: covers the tab area while a query runs -->
+    <Border x:Name="PnlProgress" Grid.Row="2" Visibility="Collapsed" Panel.ZIndex="10"
+            Background="#F21E1E2E">
+      <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Width="540">
+        <TextBlock x:Name="TxtProgBig" Text="Working..." FontSize="21" FontWeight="SemiBold"
+                   HorizontalAlignment="Center" Margin="0,0,0,16"/>
+        <ProgressBar x:Name="PrgOverlay" Height="24" Minimum="0" Maximum="100" Value="0"
+                     Foreground="#FF3B82F6" Background="#FF2A2A3C" BorderThickness="0"/>
+        <TextBlock x:Name="TxtProgSub" Text="" Foreground="#FFB8C0FF"
+                   HorizontalAlignment="Center" Margin="0,12,0,0" TextWrapping="Wrap"/>
+        <Button x:Name="BtnCancel" Content="Cancel" Width="100" Margin="0,20,0,0"
+                HorizontalAlignment="Center" Background="#FF6B7280"/>
+      </StackPanel>
+    </Border>
+
     <StatusBar Grid.Row="3" Background="#FF272739" Margin="0,8,0,0">
-      <StatusBarItem><TextBlock x:Name="TxtStatus" Text="Ready."/></StatusBarItem>
+      <StatusBarItem HorizontalContentAlignment="Stretch" Width="1320">
+        <DockPanel LastChildFill="True">
+          <ProgressBar x:Name="PrgBar" DockPanel.Dock="Right" Width="180" Height="14"
+                       Minimum="0" Maximum="100" Visibility="Collapsed" Margin="10,0,0,0"
+                       Foreground="#FF3B82F6" Background="#FF2A2A3C"/>
+          <TextBlock x:Name="TxtStatus" Text="Ready - set your filters (time range, user, categories) and click Run Query."/>
+        </DockPanel>
+      </StatusBarItem>
     </StatusBar>
   </Grid>
 </Window>
@@ -647,7 +669,7 @@ $Script:ctl.CmbTarget.Text  = $initialTarget
 $Script:ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
 
 # Shared state for the background runspace
-$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Error=$null })
+$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Prog=0; Error=$null })
 $Script:AllRows = @()
 
 function Get-SelectedIds {
@@ -713,9 +735,17 @@ function Start-Audit {
     $Script:Sync.Running  = $true
     $Script:Sync.Done     = $false
     $Script:Sync.Error    = $null
+    $Script:Sync.Prog     = 0
     $Script:Sync.Status   = if ($allDc) { 'Discovering domain controllers...' } else { "Querying $typed ..." }
     $Script:ctl.TxtStatus.Text  = $Script:Sync.Status
     $Script:ctl.BtnQuery.IsEnabled = $false
+    # Show the progress overlay so it's obvious work is happening
+    $Script:ctl.TxtProgBig.Text = if ($allDc) { 'Sweeping all domain controllers' } else { "Querying $typed" }
+    $Script:ctl.TxtProgSub.Text = 'Starting...'
+    $Script:ctl.PrgOverlay.Value = 0
+    $Script:ctl.PrgBar.Value = 0
+    $Script:ctl.PrgBar.Visibility   = 'Visible'
+    $Script:ctl.PnlProgress.Visibility = 'Visible'
     Set-Busy $true
 
     $rs = [runspacefactory]::CreateRunspace()
@@ -746,6 +776,7 @@ function Start-Audit {
             # Resolve targets off the UI thread
             if ($qa.AllDcs) {
                 $sync.Status = 'Discovering domain controllers...'
+                $sync.Prog   = 3
                 $dc = Get-DomainControllerList -Credential $qa.Credential
                 if ($dc.Error -or -not $dc.DCs) {
                     $sync.Error = "DC discovery failed: $($dc.Error)"; $sync.Done = $true; return
@@ -760,17 +791,22 @@ function Start-Audit {
             $n = $targets.Count; $i = 0
             foreach ($tgt in $targets) {
                 $i++
-                $sync.Status = "Querying $tgt  ($i/$n)..."
+                $sync.Status = "Querying $tgt   (server $i of $n)..."
+                $sync.Prog   = [int](6 + (($i - 1) / [double]$n) * 88)
                 try {
                     $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
                             -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
                             -MaxEvents $qa.MaxEvents -Credential $qa.Credential
                     foreach ($x in @($r)) { $all.Add($x) }
+                    $sync.Status = "$tgt done - $($all.Count) events so far   (server $i of $n)"
                 } catch {
                     $errs += "[$tgt] $($_.Exception.Message)"
+                    $sync.Status = "$tgt failed (continuing)   (server $i of $n)"
                 }
+                $sync.Prog = [int](6 + ($i / [double]$n) * 88)
             }
             $sync.Status = "Sorting & summarising $($all.Count) events..."
+            $sync.Prog   = 96
             $rows = @($all | Sort-Object Time -Descending)
             $sync.Rows = $rows
             if ($errs -and $all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
@@ -866,6 +902,20 @@ $Script:ctl.CmbRange.Add_SelectionChanged({
 })
 $Script:ctl.BtnQuery.Add_Click({ Invoke-Safe { Start-Audit } 'Query' })
 
+$Script:ctl.BtnCancel.Add_Click({
+    Invoke-Safe {
+        if ($Script:Sync.PS) { try { $Script:Sync.PS.Stop() } catch {} }
+        if ($Script:Sync.RS) { try { $Script:Sync.RS.Close() } catch {} }
+        $Script:Sync.Running = $false
+        $Script:Sync.Done    = $false
+        $Script:ctl.BtnQuery.IsEnabled = $true
+        $Script:ctl.PnlProgress.Visibility = 'Collapsed'
+        $Script:ctl.PrgBar.Visibility = 'Collapsed'
+        Set-Busy $false
+        $Script:ctl.TxtStatus.Text = 'Cancelled.'
+    } 'Cancel'
+})
+
 $Script:ctl.BtnDiscover.Add_Click({
     if ($Script:ctl.ChkCred.IsChecked -and -not $Script:Cred) {
         $Script:Cred = Get-Credential -Message "Domain credentials for DC discovery"
@@ -956,10 +1006,13 @@ $Script:ctl.BtnLockGo.Add_Click({
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(400)
 $timer.Add_Tick({
-    if ($Script:Sync.Running -and -not $Script:Sync.Done -and $Script:Sync.Status) {
-        if ($Script:ctl.TxtStatus.Text -ne $Script:Sync.Status) {
-            $Script:ctl.TxtStatus.Text = $Script:Sync.Status
-        }
+    if ($Script:Sync.Running -and -not $Script:Sync.Done) {
+        $s = "$($Script:Sync.Status)"
+        if ($s -and $Script:ctl.TxtStatus.Text -ne $s) { $Script:ctl.TxtStatus.Text = $s }
+        if ($s) { $Script:ctl.TxtProgSub.Text = $s }
+        $p = [int]$Script:Sync.Prog
+        $Script:ctl.PrgOverlay.Value = $p
+        $Script:ctl.PrgBar.Value = $p
     }
     if ($Script:Sync.Running -and $Script:Sync.Done) {
         Invoke-Safe {
@@ -971,11 +1024,15 @@ $timer.Add_Tick({
                 [System.Windows.MessageBox]::Show($Script:Sync.Error,'Query failed','OK','Error') | Out-Null
             } else {
                 Update-Views $Script:Sync.Rows
+                $Script:ctl.TxtStatus.Text = "{0} events  |  {1}  |  done {2}" -f `
+                    @($Script:AllRows).Count, $(if($Script:ctl.ChkAllDc.IsChecked){'all DCs'}else{$Script:ctl.CmbTarget.Text}), (Get-Date -Format 'HH:mm:ss')
             }
             if ($Script:Sync.RS) { $Script:Sync.PS.Dispose(); $Script:Sync.RS.Close() }
         } 'Results'
         $Script:Sync.Running = $false
         $Script:ctl.BtnQuery.IsEnabled = $true
+        $Script:ctl.PnlProgress.Visibility = 'Collapsed'
+        $Script:ctl.PrgBar.Visibility = 'Collapsed'
         Set-Busy $false
     }
 })
@@ -996,8 +1053,8 @@ $Script:Win.Add_Closed({
     } catch {}
 })
 
-# Kick off an initial query
-$Script:Win.Add_ContentRendered({ Invoke-Safe { Start-Audit } 'Initial query' })
+# No auto-query on open: the user sets filters first, then clicks Run Query.
+$Script:ctl.TxtStatus.Text = 'Ready - set your filters (time range, user, categories) and click Run Query.'
 
 if ($NoShow) {
     Write-Host "SELFTEST OK: window built, $($Script:ctl.Count) named controls resolved, $($Script:CatBoxes.Count) category filters." -ForegroundColor Green

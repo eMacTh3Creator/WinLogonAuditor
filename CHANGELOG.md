@@ -6,6 +6,21 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- No automatic query on launch. The app opens instantly to a "set your
+  filters and click Run Query" state so you can choose the time range
+  (e.g. last 1-6 hours), user and categories before anything runs.
+
+### Added
+- Full-screen progress overlay while a query runs: large title, a
+  determinate progress bar, live per-server status ("Querying TDC1
+  (server 2 of 4)..."), a matching status-bar bar, and a Cancel button
+  to abort a long sweep.
+
+### Fixed
+- Packaged build broke under Windows PowerShell 5.1 due to non-ASCII
+  characters in the script; source is now ASCII-only.
+
 ## [1.0.3] - 2026-05-18
 
 ### Changed
