@@ -132,12 +132,20 @@
 <section id="quickstart">
   <div class="wrap">
     <h2>Quick start</h2>
-    <p class="lead">No installer, no .NET SDK, no modules. Copy the folder and run it.</p>
+    <p class="lead">No .NET SDK and no modules to install. Grab the standalone exe,
+      or run the script directly — either way it's portable.</p>
+    <h3 style="margin:6px 0 6px">Option A — the exe (easiest)</h3>
+    <ol class="steps">
+      <li>Download <b>WinLogonAuditor.exe</b> from the latest release.</li>
+      <li>Right-click it → <b>Run as administrator</b> (needed to read the Security log).</li>
+      <li>It auto-discovers your DCs; choose a time range and click <b>Run Query</b>.</li>
+      <li>Open the <b>Logout Analyzer</b> tab and scan the <b>Likely cause</b> column.</li>
+    </ol>
+    <h3 style="margin:26px 0 6px">Option B — run the script</h3>
     <ol class="steps">
       <li>Copy the <b>WinLogonAuditor</b> folder to your DC or a domain-joined admin machine.</li>
-      <li>Right-click <b>Run-WinLogonAuditor.cmd</b> → <b>Run as administrator</b> (needed to read the Security log).</li>
+      <li>Right-click <b>Run-WinLogonAuditor.cmd</b> → <b>Run as administrator</b>.</li>
       <li>Set <b>Target</b> to your DC name, choose a time range, click <b>Run Query</b>.</li>
-      <li>Open the <b>Logout Analyzer</b> tab and scan the <b>Likely cause</b> column.</li>
     </ol>
     <div class="note"><b>Investigating an active lockout:</b> open <b>Lockout Investigator</b>,
       type the username, hit <b>Trace lockout source</b> — you get the caller computer
