@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-05-18
+
 ### Changed
 - Releases now ship a version-stamped `WinLogonAuditor-X.Y.Z.exe` as the
   primary asset so browsers stop saving `WinLogonAuditor (2).exe` duplicates
@@ -51,7 +53,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/eMacTh3Creator/WinLogonAuditor/releases/tag/v1.0.0
