@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-05-18
+
 ### Added
 - Lockout source attribution. Event 4740 frequently has no Caller
   Computer Name for NTLM/network lockouts (a Windows logging behaviour,
@@ -95,7 +97,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.2...v1.0.3
