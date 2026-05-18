@@ -81,12 +81,14 @@
       successful logons, account lockouts and unexpected logoffs from a domain
       controller — searchable by user and timeframe, with a lockout-source tracer.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/eMacTh3Creator/WinLogonAuditor/releases/latest/download/WinLogonAuditor.exe">⬇ Download WinLogonAuditor.exe</a>
+      <a class="btn primary" id="dlBtn"
+         href="https://github.com/eMacTh3Creator/WinLogonAuditor/releases/latest/download/WinLogonAuditor.exe"
+         title="Always downloads the latest release">⬇ Download WinLogonAuditor.exe</a>
       <a class="btn ghost" href="#quickstart">Get started</a>
       <a class="btn ghost" id="repoLink" href="#">View on GitHub</a>
     </div>
     <p style="margin-top:14px;font-size:13px;color:var(--muted)">
-      Latest release · run as administrator · unsigned (SmartScreen → “More info → Run anyway”) ·
+      <span id="relInfo">Latest release</span> · run as administrator · unsigned (SmartScreen → “More info → Run anyway”) ·
       <a href="https://github.com/eMacTh3Creator/WinLogonAuditor/releases/latest">all releases</a>
     </p>
   </div>
@@ -194,6 +196,25 @@
     }
     document.getElementById('repoLink').href=u;
     document.getElementById('repoLink2').href=u;
+
+    // Stamp the current released version onto the download button for
+    // tracking. The href is already a /releases/latest/ link, so it always
+    // serves the newest build even if this fetch is rate-limited/offline.
+    var m=u.match(/github\.com\/([^/]+)\/([^/]+)/);
+    if(m){
+      fetch("https://api.github.com/repos/"+m[1]+"/"+m[2]+"/releases/latest")
+        .then(function(r){ return r.ok?r.json():null; })
+        .then(function(d){
+          if(!d||!d.tag_name) return;
+          var v=d.tag_name;
+          var b=document.getElementById('dlBtn');
+          b.textContent="⬇ Download WinLogonAuditor.exe ("+v+")";
+          b.title="Latest release "+v+" — always serves the newest build";
+          var ri=document.getElementById('relInfo');
+          if(ri) ri.textContent="Latest release "+v;
+        })
+        .catch(function(){});
+    }
   })();
 </script>
 </body>
