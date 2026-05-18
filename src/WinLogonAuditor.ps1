@@ -303,6 +303,68 @@ function Invoke-AuditQuery {
 
 #endregion
 
+#region ------------------------------------------------ Config & DC discovery
+
+$Script:ConfigDir  = Join-Path $env:APPDATA 'WinLogonAuditor'
+$Script:ConfigPath = Join-Path $Script:ConfigDir 'config.json'
+
+function Get-AuditConfig {
+    $def = [pscustomobject]@{ Servers = @(); LastTarget = ''; QueryAllDcs = $false }
+    try {
+        if (Test-Path $Script:ConfigPath) {
+            $c = Get-Content $Script:ConfigPath -Raw | ConvertFrom-Json
+            if (-not $c.Servers)    { $c | Add-Member Servers @() -Force }
+            if ($null -eq $c.LastTarget)  { $c | Add-Member LastTarget '' -Force }
+            if ($null -eq $c.QueryAllDcs) { $c | Add-Member QueryAllDcs $false -Force }
+            return $c
+        }
+    } catch {}
+    return $def
+}
+
+function Save-AuditConfig {
+    param($Config)
+    try {
+        if (-not (Test-Path $Script:ConfigDir)) { New-Item -ItemType Directory -Path $Script:ConfigDir -Force | Out-Null }
+        $Config | ConvertTo-Json -Depth 4 | Set-Content -Path $Script:ConfigPath -Encoding UTF8
+    } catch {}
+}
+
+# Enumerate domain controllers for the current (or a specified) domain.
+# Works on any domain-joined machine without RSAT. Optional alternate
+# credentials let you point at another domain / use different rights.
+function Get-DomainControllerList {
+    param(
+        [string]$DomainName,
+        [pscredential]$Credential
+    )
+    foreach ($asm in 'System.DirectoryServices','System.DirectoryServices.ActiveDirectory') {
+        try { Add-Type -AssemblyName $asm -ErrorAction Stop } catch {}
+    }
+    $result = [ordered]@{ DCs = @(); Pdc = $null; Domain = $DomainName; Error = $null }
+    try {
+        if ($Credential) {
+            $dom = if ($DomainName) { $DomainName } else { $env:USERDNSDOMAIN }
+            $ctx = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext(
+                'Domain', $dom, $Credential.UserName, $Credential.GetNetworkCredential().Password)
+            $d = [System.DirectoryServices.ActiveDirectory.Domain]::GetDomain($ctx)
+        } elseif ($DomainName) {
+            $ctx = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext('Domain', $DomainName)
+            $d = [System.DirectoryServices.ActiveDirectory.Domain]::GetDomain($ctx)
+        } else {
+            $d = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+        }
+        $result.Domain = $d.Name
+        $result.DCs    = @($d.DomainControllers | ForEach-Object { $_.Name } | Sort-Object)
+        try { $result.Pdc = $d.PdcRoleOwner.Name } catch {}
+    } catch {
+        $result.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$result
+}
+
+#endregion
+
 #region --------------------------------------------------------------- CLI mode
 
 if ($Cli) {
@@ -360,7 +422,10 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
     <Border Grid.Row="0" Background="#FF272739" CornerRadius="6" Padding="10" Margin="0,0,0,8">
       <WrapPanel>
         <TextBlock Text="Target (DC/host):" Margin="0,0,6,0"/>
-        <TextBox x:Name="TxtTarget" Width="150" Margin="0,0,14,0"/>
+        <ComboBox x:Name="CmbTarget" Width="190" IsEditable="True" Margin="0,0,4,0"/>
+        <Button x:Name="BtnDiscover" Content="Discover DCs" Background="#FF6B7280"/>
+        <Button x:Name="BtnManage" Content="Servers..." Background="#FF6B7280" Margin="0,0,12,0"/>
+        <CheckBox x:Name="ChkAllDc" Content="Query all DCs"/>
         <TextBlock Text="User (wildcards ok):" Margin="0,0,6,0"/>
         <TextBox x:Name="TxtUser" Width="150" Text="*" Margin="0,0,14,0"/>
         <TextBlock Text="Range:" Margin="0,0,6,0"/>
@@ -529,7 +594,27 @@ foreach ($g in $Script:Groups.GetEnumerator()) {
     $Script:CatBoxes += $cb
 }
 
-$ctl.TxtTarget.Text = $Target
+# Load saved config and populate the target dropdown
+$Script:Config = Get-AuditConfig
+
+function Update-TargetList {
+    param([string]$Select)
+    $cur = if ($Select) { $Select } else { $ctl.CmbTarget.Text }
+    $list = New-Object System.Collections.Generic.List[string]
+    $list.Add($env:COMPUTERNAME)
+    if ($env:LOGONSERVER) { $list.Add(($env:LOGONSERVER -replace '^\\\\','')) }
+    foreach ($s in @($Script:Config.Servers)) { if ($s -and -not $list.Contains($s)) { $list.Add($s) } }
+    $ctl.CmbTarget.ItemsSource = @($list | Select-Object -Unique)
+    if ($cur) { $ctl.CmbTarget.Text = $cur }
+}
+
+Update-TargetList
+$initialTarget = if ($Script:Config.LastTarget) { $Script:Config.LastTarget }
+                 elseif ($Target -and $Target -ne $env:COMPUTERNAME) { $Target }
+                 elseif ($env:LOGONSERVER) { $env:LOGONSERVER -replace '^\\\\','' }
+                 else { $env:COMPUTERNAME }
+$ctl.CmbTarget.Text  = $initialTarget
+$ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
 
 # Shared state for the background runspace
 $Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Error=$null })
@@ -567,26 +652,45 @@ function Start-Audit {
     $win = Get-TimeWindow
 
     if ($ctl.ChkCred.IsChecked -and -not $Script:Cred) {
-        $Script:Cred = Get-Credential -Message "Credentials for $($ctl.TxtTarget.Text)"
+        $Script:Cred = Get-Credential -Message "Domain credentials for querying / DC discovery"
     }
     if (-not $ctl.ChkCred.IsChecked) { $Script:Cred = $null }
 
     $maxN = 5000; [int]::TryParse($ctl.TxtMax.Text, [ref]$maxN) | Out-Null
 
+    # Resolve target(s): one typed host, or every discovered DC.
+    if ($ctl.ChkAllDc.IsChecked) {
+        $ctl.TxtStatus.Text = 'Discovering domain controllers...'
+        $dc = Get-DomainControllerList -Credential $Script:Cred
+        if ($dc.Error -or -not $dc.DCs) {
+            $ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"; return
+        }
+        $targets = @($dc.DCs)
+    } else {
+        $t = $ctl.CmbTarget.Text.Trim()
+        if (-not $t) { $ctl.TxtStatus.Text = 'Enter or pick a target server.'; return }
+        $targets = @($t)
+    }
+
+    # Persist selection
+    $Script:Config.LastTarget  = $ctl.CmbTarget.Text.Trim()
+    $Script:Config.QueryAllDcs = [bool]$ctl.ChkAllDc.IsChecked
+    Save-AuditConfig $Script:Config
+
     $qargs = @{
-        ComputerName = $ctl.TxtTarget.Text.Trim()
-        EventIds     = $ids
-        Start        = $win[0]
-        End          = $win[1]
-        UserFilter   = $ctl.TxtUser.Text.Trim()
-        MaxEvents    = $maxN
-        Credential   = $Script:Cred
+        Targets    = $targets
+        EventIds   = $ids
+        Start      = $win[0]
+        End        = $win[1]
+        UserFilter = $ctl.TxtUser.Text.Trim()
+        MaxEvents  = $maxN
+        Credential = $Script:Cred
     }
 
     $Script:Sync.Running = $true
     $Script:Sync.Done    = $false
     $Script:Sync.Error   = $null
-    $ctl.TxtStatus.Text  = "Querying $($qargs.ComputerName) ..."
+    $ctl.TxtStatus.Text  = "Querying $($qargs.Targets -join ', ') ..."
     $ctl.BtnQuery.IsEnabled = $false
     $Win.Cursor = [System.Windows.Input.Cursors]::Wait
 
@@ -612,8 +716,20 @@ function Start-Audit {
             Set-Item function:Get-DecodedStatus      ([scriptblock]::Create($parts[2]))
             Set-Item function:Get-DecodedKerb        ([scriptblock]::Create($parts[3]))
             Set-Item function:Get-DecodedLogonType   ([scriptblock]::Create($parts[4]))
-            $r = Invoke-AuditQuery @qa
-            $sync.Rows = @($r)
+            $all = New-Object System.Collections.Generic.List[object]
+            $errs = @()
+            foreach ($tgt in $qa.Targets) {
+                try {
+                    $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
+                            -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
+                            -MaxEvents $qa.MaxEvents -Credential $qa.Credential
+                    foreach ($x in @($r)) { $all.Add($x) }
+                } catch {
+                    $errs += "[$tgt] $($_.Exception.Message)"
+                }
+            }
+            $sync.Rows = @($all | Sort-Object Time -Descending)
+            if ($errs -and $all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
         } catch {
             $sync.Error = $_.Exception.Message
         } finally {
@@ -677,7 +793,8 @@ function Apply-Filter {
         }
     }
     $ctl.Grid.ItemsSource = @($view)
-    $ctl.TxtStatus.Text = "{0} events  |  target {1}  |  {2}" -f @($view).Count, $ctl.TxtTarget.Text, (Get-Date -Format 'HH:mm:ss')
+    $tgtLbl = if ($ctl.ChkAllDc.IsChecked) { 'all DCs' } else { $ctl.CmbTarget.Text }
+    $ctl.TxtStatus.Text = "{0} events  |  target {1}  |  {2}" -f @($view).Count, $tgtLbl, (Get-Date -Format 'HH:mm:ss')
 }
 
 # --- Events / wiring ---
@@ -686,6 +803,64 @@ $ctl.CmbRange.Add_SelectionChanged({
     $ctl.DtFrom.IsEnabled = $custom; $ctl.DtTo.IsEnabled = $custom
 })
 $ctl.BtnQuery.Add_Click({ Start-Audit })
+
+$ctl.BtnDiscover.Add_Click({
+    if ($ctl.ChkCred.IsChecked -and -not $Script:Cred) {
+        $Script:Cred = Get-Credential -Message "Domain credentials for DC discovery"
+    }
+    $ctl.TxtStatus.Text = 'Discovering domain controllers...'
+    $Win.Cursor = [System.Windows.Input.Cursors]::Wait
+    $dc = Get-DomainControllerList -Credential $Script:Cred
+    $Win.Cursor = $null
+    if ($dc.Error -or -not $dc.DCs) {
+        $ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"
+        [System.Windows.MessageBox]::Show("Could not enumerate domain controllers.`n`n$($dc.Error)`n`nTip: tick 'Alt credentials' and use a domain account, or run on a domain-joined machine.",'DC discovery','OK','Warning') | Out-Null
+        return
+    }
+    $merged = @(@($Script:Config.Servers) + $dc.DCs | Where-Object { $_ } | Select-Object -Unique)
+    $Script:Config.Servers = $merged
+    Save-AuditConfig $Script:Config
+    Update-TargetList
+    if ($dc.Pdc) { $ctl.CmbTarget.Text = $dc.Pdc }
+    $pdcNote = if ($dc.Pdc) { "  PDC emulator: $($dc.Pdc) (best single target for lockouts)" } else { '' }
+    $ctl.TxtStatus.Text = "Found $($dc.DCs.Count) DC(s) in $($dc.Domain).$pdcNote"
+})
+
+$ctl.BtnManage.Add_Click({
+    [xml]$mx = @"
+<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Title='Manage servers' Height='360' Width='420' WindowStartupLocation='CenterOwner'
+        Background='#FF1E1E2E'>
+  <Grid Margin='12'>
+    <Grid.RowDefinitions><RowDefinition Height='*'/><RowDefinition Height='Auto'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>
+    <ListBox x:Name='Lst' Grid.Row='0' Background='#FF252536' Foreground='#FFE6E6E6'/>
+    <DockPanel Grid.Row='1' Margin='0,8'>
+      <Button x:Name='Rem' Content='Remove selected' DockPanel.Dock='Right' Background='#FF6B7280' Foreground='White' Padding='10,5'/>
+      <TextBox x:Name='New' />
+      <Button x:Name='Add' Content='Add' DockPanel.Dock='Right' Background='#FF3B82F6' Foreground='White' Padding='10,5' Margin='6,0'/>
+    </DockPanel>
+    <Button x:Name='Ok' Grid.Row='2' Content='Save &amp; close' Background='#FF3B82F6' Foreground='White' Padding='10,6' HorizontalAlignment='Right'/>
+  </Grid>
+</Window>
+"@
+    $mw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $mx))
+    $mw.Owner = $Win
+    $lst = $mw.FindName('Lst'); $new = $mw.FindName('New')
+    $servers = New-Object System.Collections.ObjectModel.ObservableCollection[string]
+    foreach ($s in @($Script:Config.Servers)) { if ($s) { $servers.Add($s) } }
+    $lst.ItemsSource = $servers
+    $mw.FindName('Add').Add_Click({ $v=$new.Text.Trim(); if ($v -and -not $servers.Contains($v)) { $servers.Add($v); $new.Clear() } })
+    $mw.FindName('Rem').Add_Click({ if ($lst.SelectedItem) { $servers.Remove($lst.SelectedItem) } })
+    $mw.FindName('Ok').Add_Click({
+        $Script:Config.Servers = @($servers)
+        Save-AuditConfig $Script:Config
+        Update-TargetList
+        $mw.Close()
+    })
+    $mw.ShowDialog() | Out-Null
+})
+
 $ctl.TxtFilter.Add_TextChanged({ Apply-Filter })
 $ctl.Grid.Add_SelectionChanged({
     $sel = $ctl.Grid.SelectedItem
@@ -743,7 +918,14 @@ $autoTimer.Interval = [TimeSpan]::FromSeconds(60)
 $autoTimer.Add_Tick({ if ($ctl.ChkAuto.IsChecked -and -not $Script:Sync.Running) { Start-Audit } })
 $autoTimer.Start()
 
-$Win.Add_Closed({ $timer.Stop(); $autoTimer.Stop() })
+$Win.Add_Closed({
+    $timer.Stop(); $autoTimer.Stop()
+    try {
+        $Script:Config.LastTarget  = $ctl.CmbTarget.Text.Trim()
+        $Script:Config.QueryAllDcs = [bool]$ctl.ChkAllDc.IsChecked
+        Save-AuditConfig $Script:Config
+    } catch {}
+})
 
 # Kick off an initial query
 $Win.Add_ContentRendered({ Start-Audit })

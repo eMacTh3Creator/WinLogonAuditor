@@ -20,6 +20,12 @@ time ranges, a lockout-source tracer and a logout analyzer.
 - **Decoded, human-readable** — logon types, NTSTATUS/SubStatus failure reasons
   and Kerberos failure codes are translated to plain English (no more
   `0xC000006A` guessing).
+- **Server management & DC auto-discovery** — editable target dropdown with a
+  saved server list (persisted to `%APPDATA%\WinLogonAuditor\config.json`).
+  **Discover DCs** enumerates every domain controller in your domain (using
+  your domain credentials, no RSAT required) and auto-selects the **PDC
+  emulator** — the single best target for lockout hunting. **Query all DCs**
+  fans the query across every controller and merges the results.
 - **Search by user** — wildcards supported (`jsmith`, `svc-*`, `*admin*`).
 - **Flexible timeframe** — presets (1h / 8h / 24h / 3d / 7d) or a custom
   from/to date range.
@@ -55,7 +61,9 @@ time ranges, a lockout-source tracer and a logout analyzer.
 
 ### Investigating the "users keep getting logged out" issue
 
-1. Set **Target** to the domain controller.
+1. Tick **Alt credentials** (if needed) then click **Discover DCs** — it lists
+   every DC and selects the PDC emulator automatically. Or tick **Query all
+   DCs** to sweep them all at once.
 2. Range = **Last 24 hours**, leave categories at their defaults, **Run Query**.
 3. Open the **Logout Analyzer** tab — scan the *Likely cause* column for
    lockout storms, mass reboots or RDP idle-timeout patterns.
