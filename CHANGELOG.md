@@ -6,6 +6,13 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Releases now ship a version-stamped `WinLogonAuditor-X.Y.Z.exe` as the
+  primary asset so browsers stop saving `WinLogonAuditor (2).exe` duplicates
+  and the version is visible on disk. A stable `WinLogonAuditor.exe` alias is
+  still published so existing `/releases/latest/download/` links keep working;
+  the site button now hands out the versioned file automatically.
+
 ## [1.0.2] - 2026-05-18
 
 ### Changed

@@ -208,8 +208,12 @@
           if(!d||!d.tag_name) return;
           var v=d.tag_name;
           var b=document.getElementById('dlBtn');
-          b.textContent="⬇ Download WinLogonAuditor.exe ("+v+")";
-          b.title="Latest release "+v+" — always serves the newest build";
+          // Prefer the version-stamped asset so the saved file is
+          // WinLogonAuditor-X.Y.Z.exe (no browser "(2)" duplicates).
+          var ver=(d.assets||[]).filter(function(a){return /WinLogonAuditor-.+\.exe$/i.test(a.name);})[0];
+          if(ver&&ver.browser_download_url){ b.href=ver.browser_download_url; }
+          b.textContent="⬇ Download WinLogonAuditor "+v+" (.exe)";
+          b.title="Latest release "+v+" — saves as "+(ver?ver.name:"WinLogonAuditor.exe");
           var ri=document.getElementById('relInfo');
           if(ri) ri.textContent="Latest release "+v;
         })

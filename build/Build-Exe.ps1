@@ -26,7 +26,10 @@ $ErrorActionPreference = 'Stop'
 $repo   = Split-Path $PSScriptRoot -Parent
 $src    = Join-Path $repo 'src\WinLogonAuditor.ps1'
 if (-not $OutDir) { $OutDir = Join-Path $repo 'dist' }
-$out    = Join-Path $OutDir 'WinLogonAuditor.exe'
+# Primary artifact is version-stamped so browsers don't save "(2)" copies.
+$out    = Join-Path $OutDir "WinLogonAuditor-$Version.exe"
+# Stable alias keeps /releases/latest/download/WinLogonAuditor.exe working.
+$alias  = Join-Path $OutDir 'WinLogonAuditor.exe'
 
 if (-not (Test-Path $src)) { throw "Source not found: $src" }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -53,5 +56,7 @@ Invoke-PS2EXE `
     -requireAdmin
 
 if (-not (Test-Path $out)) { throw 'Build failed: exe was not produced.' }
+Copy-Item $out $alias -Force
 $fi = Get-Item $out
 Write-Host ("OK: {0}  ({1:N0} bytes)" -f $fi.FullName, $fi.Length) -ForegroundColor Green
+Write-Host ("Alias: {0}" -f $alias) -ForegroundColor Green
