@@ -6,6 +6,14 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A slow/busy domain controller (typically the PDC emulator) no longer
+  hangs the whole sweep. DCs are now queried **in parallel**, each in its
+  own runspace, with a configurable **per-DC timeout** (default 45s, new
+  "Timeout/DC" box). Any DC that exceeds the timeout is stopped and
+  skipped with a noted error so the remaining DCs still return. Progress
+  now reflects completions ("eDC1 done (2/4) - 1,234 events so far").
+
 ## [1.0.4] - 2026-05-18
 
 ### Changed

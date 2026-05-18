@@ -443,8 +443,11 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
         <DatePicker x:Name="DtFrom" Width="120" Margin="0,0,4,0" IsEnabled="False"/>
         <DatePicker x:Name="DtTo" Width="120" Margin="0,0,14,0" IsEnabled="False"/>
         <TextBlock Text="Max:" Margin="0,0,6,0"/>
-        <TextBox x:Name="TxtMax" Width="70" Text="2000" Margin="0,0,14,0"
+        <TextBox x:Name="TxtMax" Width="60" Text="2000" Margin="0,0,10,0"
                  ToolTip="Max events per DC. Lower = faster across many DCs."/>
+        <TextBlock Text="Timeout/DC (s):" Margin="0,0,6,0"/>
+        <TextBox x:Name="TxtTimeout" Width="50" Text="45" Margin="0,0,14,0"
+                 ToolTip="If a DC takes longer than this it is skipped so the rest still return."/>
         <CheckBox x:Name="ChkCred" Content="Alt credentials"/>
         <Button x:Name="BtnQuery" Content="Run Query"/>
         <Button x:Name="BtnExport" Content="Export CSV" Background="#FF6B7280"/>
@@ -709,6 +712,8 @@ function Start-Audit {
     if (-not $Script:ctl.ChkCred.IsChecked) { $Script:Cred = $null }
 
     $maxN = 2000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
+    $toN  = 45;   [int]::TryParse($Script:ctl.TxtTimeout.Text, [ref]$toN) | Out-Null
+    if ($toN -lt 5) { $toN = 5 }
 
     $allDc = [bool]$Script:ctl.ChkAllDc.IsChecked
     $typed = $Script:ctl.CmbTarget.Text.Trim()
@@ -729,6 +734,7 @@ function Start-Audit {
         End        = $win[1]
         UserFilter = $Script:ctl.TxtUser.Text.Trim()
         MaxEvents  = $maxN
+        TimeoutSec = $toN
         Credential = $Script:Cred
     }
 
@@ -788,22 +794,73 @@ function Start-Audit {
 
             $all  = New-Object System.Collections.Generic.List[object]
             $errs = @()
-            $n = $targets.Count; $i = 0
-            foreach ($tgt in $targets) {
-                $i++
-                $sync.Status = "Querying $tgt   (server $i of $n)..."
-                $sync.Prog   = [int](6 + (($i - 1) / [double]$n) * 88)
+            $n = $targets.Count
+            $toSec = [int]$qa.TimeoutSec; if ($toSec -lt 5) { $toSec = 45 }
+            $maxConc = 8
+
+            # Each DC is queried in its own runspace so one slow/hung DC
+            # (e.g. a busy PDC emulator) can't block the others. Any DC
+            # exceeding the per-DC timeout is stopped and skipped.
+            $childScript = {
+                param($maps,$funcDefs,$tgt,$qa,$slot)
                 try {
+                    $Script:LogonTypeMap=$maps.LogonTypeMap;$Script:StatusMap=$maps.StatusMap
+                    $Script:KerbMap=$maps.KerbMap;$Script:CategoryMap=$maps.CategoryMap
+                    $Script:SecurityIds=$maps.SecurityIds;$Script:SystemIds=$maps.SystemIds
+                    $p=$funcDefs -split '\|\|\|'
+                    Set-Item function:ConvertTo-AuditRow   ([scriptblock]::Create($p[0]))
+                    Set-Item function:Invoke-AuditQuery    ([scriptblock]::Create($p[1]))
+                    Set-Item function:Get-DecodedStatus    ([scriptblock]::Create($p[2]))
+                    Set-Item function:Get-DecodedKerb      ([scriptblock]::Create($p[3]))
+                    Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($p[4]))
                     $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
                             -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
                             -MaxEvents $qa.MaxEvents -Credential $qa.Credential
-                    foreach ($x in @($r)) { $all.Add($x) }
-                    $sync.Status = "$tgt done - $($all.Count) events so far   (server $i of $n)"
-                } catch {
-                    $errs += "[$tgt] $($_.Exception.Message)"
-                    $sync.Status = "$tgt failed (continuing)   (server $i of $n)"
+                    $slot.Rows = @($r); $slot.Ok = $true
+                } catch { $slot.Err = $_.Exception.Message }
+                finally { $slot.Done = $true }
+            }
+
+            $queue   = [System.Collections.Queue]::new(@($targets))
+            $jobs    = New-Object System.Collections.Generic.List[object]
+            $doneCnt = 0
+            $sync.Status = "Querying $n server(s) in parallel (timeout ${toSec}s each)..."
+            $sync.Prog   = 6
+
+            while ($doneCnt -lt $n) {
+                # Launch up to $maxConc concurrent DC queries
+                while ($queue.Count -gt 0 -and @($jobs | Where-Object { -not $_.Closed }).Count -lt $maxConc) {
+                    $tgt  = $queue.Dequeue()
+                    $slot = [hashtable]::Synchronized(@{ Done=$false; Ok=$false; Rows=@(); Err=$null })
+                    $crs  = [runspacefactory]::CreateRunspace(); $crs.ThreadOptions='ReuseThread'; $crs.Open()
+                    $cps  = [powershell]::Create(); $cps.Runspace = $crs
+                    $cps.AddScript($childScript).AddArgument($maps).AddArgument($funcDefs).
+                         AddArgument($tgt).AddArgument($qa).AddArgument($slot) | Out-Null
+                    $h = $cps.BeginInvoke()
+                    $jobs.Add([pscustomobject]@{ Tgt=$tgt; PS=$cps; RS=$crs; H=$h; Slot=$slot;
+                                                 Start=[datetime]::Now; Closed=$false })
                 }
-                $sync.Prog = [int](6 + ($i / [double]$n) * 88)
+                foreach ($j in $jobs) {
+                    if ($j.Closed) { continue }
+                    $el = ([datetime]::Now - $j.Start).TotalSeconds
+                    if ($j.Slot.Done) {
+                        if ($j.Slot.Ok) { foreach ($x in @($j.Slot.Rows)) { $all.Add($x) } }
+                        else { $errs += "[$($j.Tgt)] $($j.Slot.Err)" }
+                        try { $j.PS.EndInvoke($j.H) | Out-Null } catch {}
+                        try { $j.PS.Dispose(); $j.RS.Close() } catch {}
+                        $j.Closed = $true; $doneCnt++
+                        $sync.Status = "$($j.Tgt) done  ($doneCnt/$n)  -  $($all.Count) events so far"
+                        $sync.Prog   = [int](6 + ($doneCnt / [double]$n) * 88)
+                    } elseif ($el -gt $toSec) {
+                        try { $j.PS.Stop() } catch {}
+                        try { $j.PS.Dispose(); $j.RS.Close() } catch {}
+                        $errs += "[$($j.Tgt)] timed out after ${toSec}s - skipped"
+                        $j.Closed = $true; $doneCnt++
+                        $sync.Status = "$($j.Tgt) timed out, skipped  ($doneCnt/$n)"
+                        $sync.Prog   = [int](6 + ($doneCnt / [double]$n) * 88)
+                    }
+                }
+                if ($doneCnt -lt $n) { Start-Sleep -Milliseconds 300 }
             }
             $sync.Status = "Sorting & summarising $($all.Count) events..."
             $sync.Prog   = 96
