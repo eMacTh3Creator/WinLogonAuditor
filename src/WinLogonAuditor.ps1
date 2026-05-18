@@ -443,7 +443,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
         <DatePicker x:Name="DtFrom" Width="120" Margin="0,0,4,0" IsEnabled="False"/>
         <DatePicker x:Name="DtTo" Width="120" Margin="0,0,14,0" IsEnabled="False"/>
         <TextBlock Text="Max:" Margin="0,0,6,0"/>
-        <TextBox x:Name="TxtMax" Width="70" Text="5000" Margin="0,0,14,0"/>
+        <TextBox x:Name="TxtMax" Width="70" Text="2000" Margin="0,0,14,0"
+                 ToolTip="Max events per DC. Lower = faster across many DCs."/>
         <CheckBox x:Name="ChkCred" Content="Alt credentials"/>
         <Button x:Name="BtnQuery" Content="Run Query"/>
         <Button x:Name="BtnExport" Content="Export CSV" Background="#FF6B7280"/>
@@ -646,7 +647,7 @@ $Script:ctl.CmbTarget.Text  = $initialTarget
 $Script:ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
 
 # Shared state for the background runspace
-$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Error=$null })
+$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Error=$null })
 $Script:AllRows = @()
 
 function Get-SelectedIds {
@@ -685,29 +686,22 @@ function Start-Audit {
     }
     if (-not $Script:ctl.ChkCred.IsChecked) { $Script:Cred = $null }
 
-    $maxN = 5000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
+    $maxN = 2000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
 
-    # Resolve target(s): one typed host, or every discovered DC.
-    if ($Script:ctl.ChkAllDc.IsChecked) {
-        $Script:ctl.TxtStatus.Text = 'Discovering domain controllers...'
-        $dc = Get-DomainControllerList -Credential $Script:Cred
-        if ($dc.Error -or -not $dc.DCs) {
-            $Script:ctl.TxtStatus.Text = "DC discovery failed: $($dc.Error)"; return
-        }
-        $targets = @($dc.DCs)
-    } else {
-        $t = $Script:ctl.CmbTarget.Text.Trim()
-        if (-not $t) { $Script:ctl.TxtStatus.Text = 'Enter or pick a target server.'; return }
-        $targets = @($t)
+    $allDc = [bool]$Script:ctl.ChkAllDc.IsChecked
+    $typed = $Script:ctl.CmbTarget.Text.Trim()
+    if (-not $allDc -and -not $typed) {
+        $Script:ctl.TxtStatus.Text = 'Enter or pick a target server.'; return
     }
 
     # Persist selection
-    $Script:Config.LastTarget  = $Script:ctl.CmbTarget.Text.Trim()
-    $Script:Config.QueryAllDcs = [bool]$Script:ctl.ChkAllDc.IsChecked
+    $Script:Config.LastTarget  = $typed
+    $Script:Config.QueryAllDcs = $allDc
     Save-AuditConfig $Script:Config
 
     $qargs = @{
-        Targets    = $targets
+        AllDcs     = $allDc
+        TypedTarget= $typed
         EventIds   = $ids
         Start      = $win[0]
         End        = $win[1]
@@ -716,10 +710,11 @@ function Start-Audit {
         Credential = $Script:Cred
     }
 
-    $Script:Sync.Running = $true
-    $Script:Sync.Done    = $false
-    $Script:Sync.Error   = $null
-    $Script:ctl.TxtStatus.Text  = "Querying $($qargs.Targets -join ', ') ..."
+    $Script:Sync.Running  = $true
+    $Script:Sync.Done     = $false
+    $Script:Sync.Error    = $null
+    $Script:Sync.Status   = if ($allDc) { 'Discovering domain controllers...' } else { "Querying $typed ..." }
+    $Script:ctl.TxtStatus.Text  = $Script:Sync.Status
     $Script:ctl.BtnQuery.IsEnabled = $false
     Set-Busy $true
 
@@ -729,7 +724,8 @@ function Start-Audit {
     $rs.SessionStateProxy.SetVariable('qa',      $qargs)
     $rs.SessionStateProxy.SetVariable('funcDefs',
         "${function:ConvertTo-AuditRow}|||${function:Invoke-AuditQuery}|||" +
-        "${function:Get-DecodedStatus}|||${function:Get-DecodedKerb}|||${function:Get-DecodedLogonType}")
+        "${function:Get-DecodedStatus}|||${function:Get-DecodedKerb}|||${function:Get-DecodedLogonType}|||" +
+        "${function:Get-DomainControllerList}")
     $rs.SessionStateProxy.SetVariable('maps', @{
         LogonTypeMap=$Script:LogonTypeMap; StatusMap=$Script:StatusMap; KerbMap=$Script:KerbMap
         CategoryMap=$Script:CategoryMap; SecurityIds=$Script:SecurityIds; SystemIds=$Script:SystemIds })
@@ -740,14 +736,31 @@ function Start-Audit {
             $Script:KerbMap = $maps.KerbMap; $Script:CategoryMap = $maps.CategoryMap
             $Script:SecurityIds = $maps.SecurityIds; $Script:SystemIds = $maps.SystemIds
             $parts = $funcDefs -split '\|\|\|'
-            Set-Item function:ConvertTo-AuditRow     ([scriptblock]::Create($parts[0]))
-            Set-Item function:Invoke-AuditQuery      ([scriptblock]::Create($parts[1]))
-            Set-Item function:Get-DecodedStatus      ([scriptblock]::Create($parts[2]))
-            Set-Item function:Get-DecodedKerb        ([scriptblock]::Create($parts[3]))
-            Set-Item function:Get-DecodedLogonType   ([scriptblock]::Create($parts[4]))
-            $all = New-Object System.Collections.Generic.List[object]
+            Set-Item function:ConvertTo-AuditRow       ([scriptblock]::Create($parts[0]))
+            Set-Item function:Invoke-AuditQuery        ([scriptblock]::Create($parts[1]))
+            Set-Item function:Get-DecodedStatus        ([scriptblock]::Create($parts[2]))
+            Set-Item function:Get-DecodedKerb          ([scriptblock]::Create($parts[3]))
+            Set-Item function:Get-DecodedLogonType     ([scriptblock]::Create($parts[4]))
+            Set-Item function:Get-DomainControllerList ([scriptblock]::Create($parts[5]))
+
+            # Resolve targets off the UI thread
+            if ($qa.AllDcs) {
+                $sync.Status = 'Discovering domain controllers...'
+                $dc = Get-DomainControllerList -Credential $qa.Credential
+                if ($dc.Error -or -not $dc.DCs) {
+                    $sync.Error = "DC discovery failed: $($dc.Error)"; $sync.Done = $true; return
+                }
+                $targets = @($dc.DCs)
+            } else {
+                $targets = @($qa.TypedTarget)
+            }
+
+            $all  = New-Object System.Collections.Generic.List[object]
             $errs = @()
-            foreach ($tgt in $qa.Targets) {
+            $n = $targets.Count; $i = 0
+            foreach ($tgt in $targets) {
+                $i++
+                $sync.Status = "Querying $tgt  ($i/$n)..."
                 try {
                     $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
                             -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
@@ -757,8 +770,56 @@ function Start-Audit {
                     $errs += "[$tgt] $($_.Exception.Message)"
                 }
             }
-            $sync.Rows = @($all | Sort-Object Time -Descending)
+            $sync.Status = "Sorting & summarising $($all.Count) events..."
+            $rows = @($all | Sort-Object Time -Descending)
+            $sync.Rows = $rows
             if ($errs -and $all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
+
+            # Pre-compute every view here (off the UI thread) using single
+            # passes / hashtables, so binding on the UI thread is instant.
+            $catC = @{}; $usrF = @{}; $srcF = @{}
+            $rebootTotal = 0
+            $perUser = @{}   # user -> aggregate hashtable
+            foreach ($x in $rows) {
+                $catC[$x.Category] = 1 + ([int]$catC[$x.Category])
+                $isFail = ($x.Result -eq 'Failure' -or $x.Result -eq 'Lockout')
+                if ($x.EventId -eq 1074 -or $x.EventId -eq 6008 -or $x.EventId -eq 41) { $rebootTotal++ }
+                if ($isFail) {
+                    if ($x.User) { $usrF[$x.User] = 1 + ([int]$usrF[$x.User]) }
+                    $s = if ($x.SourceHost) { $x.SourceHost } elseif ($x.SourceIP) { $x.SourceIP } else { '(unknown)' }
+                    $srcF[$s] = 1 + ([int]$srcF[$s])
+                }
+                if ($x.User) {
+                    $u = $perUser[$x.User]
+                    if (-not $u) { $u = @{ lo=0; rd=0; lk=0; out=0; last=$x.Time; lastStr=$x.TimeStr }; $perUser[$x.User] = $u }
+                    switch ($x.EventId) {
+                        4634 { $u.lo++ } 4647 { $u.lo++ }
+                        4779 { $u.rd++ } 4800 { $u.lk++ } 4740 { $u.out++ }
+                    }
+                    if ($x.Time -gt $u.last) { $u.last = $x.Time; $u.lastStr = $x.TimeStr }
+                }
+            }
+            $top = { param($h) @($h.GetEnumerator() | Sort-Object Value -Descending |
+                     Select-Object -First 25 | ForEach-Object { [pscustomobject]@{ Name=$_.Key; Count=$_.Value } }) }
+            $byUser = foreach ($kv in $perUser.GetEnumerator()) {
+                $u = $kv.Value; $likely = @()
+                if ($u.out -gt 0)                    { $likely += "Account LOCKOUT ($($u.out)) - bad cached creds/old session somewhere" }
+                if ($rebootTotal -gt 0 -and $u.lo -gt 0) { $likely += "Machine reboot/shutdown in window ($rebootTotal) - users dropped" }
+                if ($u.rd -gt 2)                     { $likely += "Repeated RDP disconnects ($($u.rd)) - idle/session-limit GPO or network" }
+                if ($u.lk -gt 5)                     { $likely += "Frequent workstation locks ($($u.lk)) - screensaver/lock GPO" }
+                if (-not $likely)                    { $likely += "Normal sign-out activity" }
+                [pscustomobject]@{
+                    User=$kv.Key; Logoffs=$u.lo; RdpDisc=$u.rd; Locks=$u.lk; Lockouts=$u.out
+                    Last=$u.last; LastStr=$u.lastStr; Likely=($likely -join '  |  ')
+                }
+            }
+            $sync.Views = @{
+                Cat    = @($catC.GetEnumerator() | Sort-Object Value -Descending |
+                          ForEach-Object { [pscustomobject]@{ Name=$_.Key; Count=$_.Value } })
+                User   = & $top $usrF
+                Src    = & $top $srcF
+                ByUser = @($byUser | Sort-Object Last -Descending)
+            }
         } catch {
             $sync.Error = $_.Exception.Message
         } finally {
@@ -776,41 +837,13 @@ function Update-Views {
     param($rows)
     $Script:AllRows = @($rows)
     Apply-Filter
-    # Summary - by category
-    $Script:ctl.GridSumCat.ItemsSource = @($rows | Group-Object Category | Sort-Object Count -Descending |
-        ForEach-Object { [pscustomobject]@{ Name=$_.Name; Count=$_.Count } })
-    # Top users by failure
-    $Script:ctl.GridSumUser.ItemsSource = @($rows | Where-Object { $_.Result -in 'Failure','Lockout' -and $_.User } |
-        Group-Object User | Sort-Object Count -Descending | Select-Object -First 25 |
-        ForEach-Object { [pscustomobject]@{ Name=$_.Name; Count=$_.Count } })
-    # Top sources by failure
-    $Script:ctl.GridSumSrc.ItemsSource = @($rows | Where-Object { $_.Result -in 'Failure','Lockout' } |
-        ForEach-Object { if ($_.SourceHost) { $_.SourceHost } elseif ($_.SourceIP) { $_.SourceIP } else { '(unknown)' } } |
-        Group-Object | Sort-Object Count -Descending | Select-Object -First 25 |
-        ForEach-Object { [pscustomobject]@{ Name=$_.Name; Count=$_.Count } })
-
-    # Logout analyzer - group by user
-    $byUser = $rows | Where-Object { $_.User } | Group-Object User | ForEach-Object {
-        $g = $_.Group
-        $lo = @($g | Where-Object EventId -in 4634,4647).Count
-        $rd = @($g | Where-Object EventId -eq 4779).Count
-        $lk = @($g | Where-Object EventId -eq 4800).Count
-        $out= @($g | Where-Object EventId -eq 4740).Count
-        $reboot = @($rows | Where-Object EventId -in 1074,6008,41).Count
-        $likely = @()
-        if ($out -gt 0)            { $likely += "Account LOCKOUT ($out) - bad cached creds/old session somewhere" }
-        if ($reboot -gt 0 -and $lo -gt 0) { $likely += "Machine reboot/shutdown in window ($reboot) - users dropped" }
-        if ($rd -gt 2)             { $likely += "Repeated RDP disconnects ($rd) - idle/session-limit GPO or network" }
-        if ($lk -gt 5)             { $likely += "Frequent workstation locks ($lk) - screensaver/lock GPO" }
-        if (-not $likely)          { $likely += "Normal sign-out activity" }
-        [pscustomobject]@{
-            User=$_.Name; Logoffs=$lo; RdpDisc=$rd; Locks=$lk; Lockouts=$out
-            Last=($g | Sort-Object Time -Descending | Select-Object -First 1).Time
-            LastStr=($g | Sort-Object Time -Descending | Select-Object -First 1).TimeStr
-            Likely=($likely -join '  |  ')
-        }
+    $v = $Script:Sync.Views
+    if ($v) {
+        $Script:ctl.GridSumCat.ItemsSource  = $v.Cat
+        $Script:ctl.GridSumUser.ItemsSource = $v.User
+        $Script:ctl.GridSumSrc.ItemsSource  = $v.Src
+        $Script:ctl.GridOut.ItemsSource     = $v.ByUser
     }
-    $Script:ctl.GridOut.ItemsSource = @($byUser | Sort-Object Last -Descending)
 }
 
 function Apply-Filter {
@@ -923,6 +956,11 @@ $Script:ctl.BtnLockGo.Add_Click({
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(400)
 $timer.Add_Tick({
+    if ($Script:Sync.Running -and -not $Script:Sync.Done -and $Script:Sync.Status) {
+        if ($Script:ctl.TxtStatus.Text -ne $Script:Sync.Status) {
+            $Script:ctl.TxtStatus.Text = $Script:Sync.Status
+        }
+    }
     if ($Script:Sync.Running -and $Script:Sync.Done) {
         Invoke-Safe {
             try {

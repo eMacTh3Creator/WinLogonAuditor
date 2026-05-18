@@ -6,6 +6,14 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- UI no longer freezes (stuck hourglass) when querying. Domain-controller
+  discovery and **all** result aggregation (summary tabs + Logout Analyzer)
+  now run on the background thread instead of the UI thread; the per-user
+  analysis was rewritten from an O(users x events) rescan to a single
+  hashtable pass. Live per-DC progress is shown in the status bar, and the
+  default max-events-per-DC was lowered to 2000 for snappier multi-DC sweeps.
+
 ## [1.0.1] - 2026-05-18
 
 ### Fixed
