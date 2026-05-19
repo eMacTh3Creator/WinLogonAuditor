@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-05-19
+
 ### Fixed
 - All DCs timing out on broad multi-DC queries (e.g. 24h with Kerberos
   4768/4769 selected). Root cause: the v1.1.0 cap raise to 100k events
@@ -205,9 +207,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...HEAD
-[1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.4
-[1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.4
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.5...HEAD
+[1.1.5]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.1...v1.1.2
