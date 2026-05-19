@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.7] - 2026-05-19
+
 ### Fixed
 - Multi-DC queries still timing out even at cap 5000 / 8-24h: the log
   proved Get-WinEvent never returned (reached "fetching", never
@@ -234,7 +236,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.6...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.7...HEAD
+[1.1.7]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.6...v1.1.7
 [1.1.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.3...v1.1.4
