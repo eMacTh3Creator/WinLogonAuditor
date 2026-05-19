@@ -6,6 +6,21 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Per-run logging to %TEMP%\WinLogonAuditor_yyyyMMdd_HHmmss.log (the 10
+  most recent runs are kept). Captures startup/env, query parameters,
+  per-DC start/done/timeout/error, worker phase markers, and full
+  exception type + message + script stack trace. Error dialogs and the
+  status bar now show the log path.
+
+### Fixed
+- "Argument types do not match" on multi-DC ("Query all DCs") queries in
+  the packaged exe. Root cause: applying the array operator directly to a
+  System.Collections.Generic.List ( @($list) ) is unreliable under the
+  PS2EXE runtime. The result list is now materialised with .ToArray() /
+  pipeline collection, and the exclude pass is skipped entirely when no
+  exclude patterns are configured.
+
 ## [1.1.1] - 2026-05-19
 
 ### Fixed

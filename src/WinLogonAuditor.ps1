@@ -450,6 +450,35 @@ function Test-RowExcluded {
     return $false
 }
 
+#endregion
+
+#region ----------------------------------------------------------- Run logging
+
+$Script:AppVersion = '1.1.2'
+$Script:RunLog = Join-Path $env:TEMP ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+function Write-Log {
+    param([string]$Message, [string]$Level = 'INFO')
+    try {
+        $line = "[{0}] [{1}] {2}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Level, $Message
+        [System.IO.File]::AppendAllText($Script:RunLog, $line)
+    } catch {}
+}
+
+# Keep only the 10 most recent run logs in %TEMP%.
+function Limit-RunLogs {
+    try {
+        Get-ChildItem -Path $env:TEMP -Filter 'WinLogonAuditor_*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -Skip 10 |
+            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+    } catch {}
+}
+
+Write-Log ("WinLogonAuditor v{0} starting | OS {1} | PS {2} | user {3}\{4} | mode {5}" -f `
+    $Script:AppVersion, [Environment]::OSVersion.Version, $PSVersionTable.PSVersion,
+    $env:USERDOMAIN, $env:USERNAME, $(if ($Cli) { 'CLI' } elseif ($NoShow) { 'SelfTest' } else { 'GUI' }))
+Limit-RunLogs
+
 # Enumerate domain controllers for the current (or a specified) domain.
 # Works on any domain-joined machine without RSAT. Optional alternate
 # credentials let you point at another domain / use different rights.
@@ -923,7 +952,9 @@ function Invoke-Safe {
         try { $Script:Sync.Running = $false } catch {}
         try { $Script:ctl.BtnQuery.IsEnabled = $true } catch {}
         $ln = try { $_.InvocationInfo.ScriptLineNumber } catch { '?' }
-        $m = "{0} failed: {1}  [line {2}]" -f $What, $_.Exception.Message, $ln
+        $stk = ('' + $_.ScriptStackTrace) -replace "`r?`n",' <<< '
+        Write-Log ("$What failed: $($_.Exception.GetType().Name): $($_.Exception.Message) [line $ln] stack: $stk") 'ERROR'
+        $m = "{0} failed: {1}  [line {2}]  (log: {3})" -f $What, $_.Exception.Message, $ln, $Script:RunLog
         try { $Script:ctl.TxtStatus.Text = $m } catch {}
         try { [System.Windows.MessageBox]::Show($m,'WinLogonAuditor','OK','Warning') | Out-Null } catch {}
     }
@@ -1040,7 +1071,12 @@ function Start-Audit {
         TimeoutSec = $toN
         Credential = $Script:Cred
         Excludes   = $Script:Config.Excludes
+        LogFile    = $Script:RunLog
     }
+
+    Write-Log ("RunQuery: allDC={0} target='{1}' ids=[{2}] window={3:yyyy-MM-dd HH:mm}..{4:HH:mm} max={5} timeout={6}s exU={7} exS={8} exD={9}" -f `
+        $allDc, $typed, ($ids -join ','), $win[0], $win[1], $maxN, $toN,
+        @($Script:Config.Excludes.Users).Count, @($Script:Config.Excludes.Sources).Count, @($Script:Config.Excludes.DCs).Count)
 
     $Script:Sync.Running  = $true
     $Script:Sync.Done     = $false
@@ -1071,11 +1107,15 @@ function Start-Audit {
         CategoryMap=$Script:CategoryMap; SecurityIds=$Script:SecurityIds; SystemIds=$Script:SystemIds })
 
     $worker = {
+        function wlog($m,$lvl='INFO'){ try { [System.IO.File]::AppendAllText($qa.LogFile, ("[{0}] [{1}] [worker] {2}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$lvl,$m)) } catch {} }
+        $phase = 'init'
         try {
+            wlog 'worker started'
             $Script:LogonTypeMap = $maps.LogonTypeMap; $Script:StatusMap = $maps.StatusMap
             $Script:KerbMap = $maps.KerbMap; $Script:CategoryMap = $maps.CategoryMap
             $Script:SecurityIds = $maps.SecurityIds; $Script:SystemIds = $maps.SystemIds
             $parts = $funcDefs -split '\|\|\|'
+            wlog "funcDefs parts=$($parts.Count)"
             Set-Item function:ConvertTo-AuditRow       ([scriptblock]::Create($parts[0]))
             Set-Item function:Invoke-AuditQuery        ([scriptblock]::Create($parts[1]))
             Set-Item function:Get-DecodedStatus        ([scriptblock]::Create($parts[2]))
@@ -1086,17 +1126,20 @@ function Start-Audit {
             Set-Item function:Test-RowExcluded         ([scriptblock]::Create($parts[7]))
 
             # Resolve targets off the UI thread
+            $phase = 'discovery'
             if ($qa.AllDcs) {
                 $sync.Status = 'Discovering domain controllers...'
                 $sync.Prog   = 3
                 $dc = Get-DomainControllerList -Credential $qa.Credential
                 if ($dc.Error -or -not $dc.DCs) {
+                    wlog "discovery failed: $($dc.Error)" 'ERROR'
                     $sync.Error = "DC discovery failed: $($dc.Error)"; $sync.Done = $true; return
                 }
                 $targets = @($dc.DCs)
             } else {
                 $targets = @($qa.TypedTarget)
             }
+            wlog "targets: $($targets -join ', ')"
 
             $all  = New-Object System.Collections.Generic.List[object]
             $errs = @()
@@ -1109,7 +1152,9 @@ function Start-Audit {
             # exceeding the per-DC timeout is stopped and skipped.
             $childScript = {
                 param($maps,$funcDefs,$tgt,$qa,$slot)
+                function clog($m,$lvl='INFO'){ try { [System.IO.File]::AppendAllText($qa.LogFile, ("[{0}] [{1}] [dc:$tgt] {2}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$lvl,$m)) } catch {} }
                 try {
+                    clog 'child started'
                     $Script:LogonTypeMap=$maps.LogonTypeMap;$Script:StatusMap=$maps.StatusMap
                     $Script:KerbMap=$maps.KerbMap;$Script:CategoryMap=$maps.CategoryMap
                     $Script:SecurityIds=$maps.SecurityIds;$Script:SystemIds=$maps.SystemIds
@@ -1124,7 +1169,12 @@ function Start-Audit {
                             -MaxEvents $qa.MaxEvents -Credential $qa.Credential
                     $slot.Rows = @($r); $slot.Ok = $true
                     $slot.Capped = (@($r).Count -ge [int]$qa.MaxEvents)
-                } catch { $slot.Err = "$($_.Exception.Message)  @ $($_.InvocationInfo.ScriptLineNumber)" }
+                    clog "child OK rows=$(@($r).Count) capped=$($slot.Capped)"
+                } catch {
+                    $stk = ('' + $_.ScriptStackTrace) -replace "`r?`n",' <<< '
+                    $slot.Err = "$($_.Exception.GetType().Name): $($_.Exception.Message)  @ line $($_.InvocationInfo.ScriptLineNumber)"
+                    clog "child EXCEPTION: $($slot.Err) | $($_.InvocationInfo.Line.Trim()) | stack: $stk" 'ERROR'
+                }
                 finally { $slot.Done = $true }
             }
 
@@ -1160,6 +1210,8 @@ function Start-Audit {
                         try { $j.PS.EndInvoke($j.H) | Out-Null } catch {}
                         try { $j.PS.Dispose(); $j.RS.Close() } catch {}
                         $j.Closed = $true; $doneCnt++
+                        if ($j.Slot.Ok) { wlog "$($j.Tgt) OK rows=$(@($j.Slot.Rows).Count) capped=$($j.Slot.Capped)" }
+                        else { wlog "$($j.Tgt) ERROR: $($j.Slot.Err)" 'ERROR' }
                         $sync.Status = "$($j.Tgt) done  ($doneCnt/$n)  -  $($all.Count) events so far"
                         $sync.Prog   = [int](6 + ($doneCnt / [double]$n) * 88)
                     } elseif ($el -gt $toSec) {
@@ -1167,30 +1219,43 @@ function Start-Audit {
                         try { $j.PS.Dispose(); $j.RS.Close() } catch {}
                         $errs += "[$($j.Tgt)] timed out after ${toSec}s - skipped"
                         $j.Closed = $true; $doneCnt++
+                        wlog "$($j.Tgt) TIMEOUT after ${toSec}s - skipped" 'WARN'
                         $sync.Status = "$($j.Tgt) timed out, skipped  ($doneCnt/$n)"
                         $sync.Prog   = [int](6 + ($doneCnt / [double]$n) * 88)
                     }
                 }
                 if ($doneCnt -lt $n) { Start-Sleep -Milliseconds 300 }
             }
+            $phase = 'sort'
+            wlog "all DCs done. raw=$($all.Count) errs=$($errs.Count)"
             $sync.Status = "Sorting & summarising $($all.Count) events..."
             $sync.Prog   = 96
             $rawCount = $all.Count
-            $rows = @($all | Sort-Object Time -Descending)
+            $rows = @($all.ToArray() | Sort-Object Time -Descending)
 
             # --- Apply exclude lists (Feature 2), post-retrieval ---
+            $phase = 'excludes'
+            $exU = @(); $exS = @(); $exD = @()
             if ($qa.Excludes) {
-                $kept = New-Object System.Collections.Generic.List[object]
-                foreach ($x in $rows) { if (-not (Test-RowExcluded $x $qa.Excludes)) { $kept.Add($x) } }
+                if ($qa.Excludes.Users)   { $exU = @($qa.Excludes.Users) }
+                if ($qa.Excludes.Sources) { $exS = @($qa.Excludes.Sources) }
+                if ($qa.Excludes.DCs)     { $exD = @($qa.Excludes.DCs) }
+            }
+            if ($exU.Count -or $exS.Count -or $exD.Count) {
+                $exObj = [pscustomobject]@{ Users=$exU; Sources=$exS; DCs=$exD }
+                $kept = foreach ($x in $rows) { if (-not (Test-RowExcluded $x $exObj)) { $x } }
+                $kept = @($kept)
                 $sync.Excluded = $rawCount - $kept.Count
-                $rows = @($kept)
+                $rows = $kept
             } else { $sync.Excluded = 0 }
             $sync.Capped = [bool]$anyCapped
+            wlog "after excludes: rows=$($rows.Count) excluded=$($sync.Excluded) capped=$($sync.Capped)"
 
             # --- Correlate 4740 lockouts to what actually locked them ---
             # Windows often logs 4740 with no Caller Computer Name for
             # NTLM/network lockouts. The real source is the bad-password
             # 4625 / 4776 / 4771 for the same user moments earlier.
+            $phase = 'correlate'
             $srcByUser = @{}
             foreach ($x in $rows) {
                 if ($x.EventId -in 4625,4776,4771 -and $x.User) {
@@ -1224,6 +1289,7 @@ function Start-Audit {
             }
 
             # --- Best-effort reverse DNS for source IPs (cached) ---
+            $phase = 'dns'
             $dnsCache = @{}
             foreach ($x in $rows) {
                 $ip = "$($x.SourceIP)"
@@ -1242,6 +1308,7 @@ function Start-Audit {
 
             # Pre-compute every view here (off the UI thread) using single
             # passes / hashtables, so binding on the UI thread is instant.
+            $phase = 'aggregate'
             $catC = @{}; $usrF = @{}; $srcF = @{}
             $rebootTotal = 0
             $perUser = @{}   # user -> aggregate hashtable
@@ -1278,6 +1345,7 @@ function Start-Audit {
                     Last=$u.last; LastStr=$u.lastStr; Likely=($likely -join '  |  ')
                 }
             }
+            $phase = 'views'
             $sync.Views = @{
                 Cat    = @($catC.GetEnumerator() | Sort-Object Value -Descending |
                           ForEach-Object { [pscustomobject]@{ Name=$_.Key; Count=$_.Value } })
@@ -1285,12 +1353,17 @@ function Start-Audit {
                 Src    = & $top $srcF
                 ByUser = @($byUser | Sort-Object Last -Descending)
             }
+            wlog "worker complete: rows=$($rows.Count) views built"
         } catch {
             $eln = $_.InvocationInfo.ScriptLineNumber
             $esrc = ('' + $_.InvocationInfo.Line).Trim()
-            $sync.Error = "$($_.Exception.Message)  [line $eln : $esrc]"
+            $stk = ('' + $_.ScriptStackTrace) -replace "`r?`n",' <<< '
+            $etype = $_.Exception.GetType().FullName
+            wlog "EXCEPTION in phase '$phase': $etype : $($_.Exception.Message) | line $eln : $esrc | stack: $stk" 'ERROR'
+            $sync.Error = "$($_.Exception.Message)  [phase=$phase line $eln : $esrc]"
         } finally {
             $sync.Done = $true
+            wlog "worker finished (phase=$phase)"
         }
     }
     $ps = [powershell]::Create(); $ps.Runspace = $rs
@@ -1565,7 +1638,8 @@ $Script:ctl.BtnLockGo.Add_Click({ Invoke-Safe {
 
     $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState='STA'; $rs.ThreadOptions='ReuseThread'; $rs.Open()
     $rs.SessionStateProxy.SetVariable('lsync', $Script:LockSync)
-    $rs.SessionStateProxy.SetVariable('lt', @{ Targets=$targets; User=$u; Lb=$lb; Cred=$Script:Cred })
+    Write-Log ("LockoutTrace: user='$u' lookback=${lb}min targets=$($targets -join ',')")
+    $rs.SessionStateProxy.SetVariable('lt', @{ Targets=$targets; User=$u; Lb=$lb; Cred=$Script:Cred; LogFile=$Script:RunLog })
     $rs.SessionStateProxy.SetVariable('fd',
         "${function:ConvertTo-AuditRow}|||${function:Invoke-AuditQuery}|||${function:Get-DecodedStatus}|||" +
         "${function:Get-DecodedKerb}|||${function:Get-DecodedLogonType}|||${function:Invoke-LockoutTrace}")
@@ -1585,7 +1659,11 @@ $Script:ctl.BtnLockGo.Add_Click({ Invoke-Safe {
             Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($p[4]))
             Set-Item function:Invoke-LockoutTrace  ([scriptblock]::Create($p[5]))
             $lsync.Trail = @(Invoke-LockoutTrace -Targets $lt.Targets -User $lt.User -LookbackMinutes $lt.Lb -Credential $lt.Cred -DnsCache @{})
-        } catch { $lsync.Err = $_.Exception.Message }
+            try { [System.IO.File]::AppendAllText($lt.LogFile, ("[{0}] [INFO] [locktrace] rows=$(@($lsync.Trail).Count)`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'))) } catch {}
+        } catch {
+            $lsync.Err = $_.Exception.Message
+            try { [System.IO.File]::AppendAllText($lt.LogFile, ("[{0}] [ERROR] [locktrace] $($_.Exception.Message) | stack: $(('' + $_.ScriptStackTrace) -replace "`r?`n",' <<< ')`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'))) } catch {}
+        }
         finally { $lsync.Done = $true }
     }
     $ps=[powershell]::Create(); $ps.Runspace=$rs
@@ -1611,10 +1689,12 @@ $timer.Add_Tick({
                 if ($Script:Sync.PS) { $Script:Sync.PS.EndInvoke($Script:Sync.Handle) | Out-Null }
             } catch {}
             if ($Script:Sync.Error) {
-                $Script:ctl.TxtStatus.Text = "ERROR: $($Script:Sync.Error)"
-                [System.Windows.MessageBox]::Show($Script:Sync.Error,'Query failed','OK','Error') | Out-Null
+                Write-Log "Query error surfaced: $($Script:Sync.Error)" 'ERROR'
+                $Script:ctl.TxtStatus.Text = "ERROR: $($Script:Sync.Error)  (log: $($Script:RunLog))"
+                [System.Windows.MessageBox]::Show("$($Script:Sync.Error)`n`nFull log:`n$($Script:RunLog)",'Query failed','OK','Error') | Out-Null
             } else {
                 Update-Views $Script:Sync.Rows
+                Write-Log "Query OK: rows=$(@($Script:AllRows).Count) excluded=$($Script:Sync.Excluded) capped=$($Script:Sync.Capped)"
                 $Script:ctl.TxtStatus.Text = "{0} events  |  {1}  |  done {2}" -f `
                     @($Script:AllRows).Count, $(if($Script:ctl.ChkAllDc.IsChecked){'all DCs'}else{$Script:ctl.CmbTarget.Text}), (Get-Date -Format 'HH:mm:ss')
             }
