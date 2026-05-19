@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.14] - 2026-05-19
+
 ### Fixed
 - Large pulls (e.g. Max events/DC = 100000) hung. Two costs scaled
   with volume: every row carried a full reconstructed EventData dump
@@ -331,7 +333,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.13...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.14...HEAD
+[1.1.14]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.13...v1.1.14
 [1.1.13]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.12...v1.1.13
 [1.1.12]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.11...v1.1.12
 [1.1.11]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.10...v1.1.11
