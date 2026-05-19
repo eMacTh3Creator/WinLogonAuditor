@@ -6,6 +6,20 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- THE remote timeout, definitively. Diffing v1.0.6 (worked, at 1h)
+  proved the per-DC mechanism was always identical; eight query-shape
+  tweaks all still hung inside Get-WinEvent -ComputerName for every DC,
+  any cap, any user. Root cause: Get-WinEvent -ComputerName uses the
+  legacy Event Log RPC protocol that marshals every record across the
+  wire and does not scale to a busy DC Security log. Replaced the
+  remote transport with PowerShell Remoting: the query + row conversion
+  now run ON each DC via Invoke-Command (WinRM) and only the small
+  flattened result set is returned - the approach scalable AD tools
+  use. Local queries still run in-process. Clear actionable error if
+  WinRM is unavailable on a DC. (Query is still ID-only newest-first,
+  capped, windowed client-side - now executed locally on the DC.)
+
 ## [1.1.8] - 2026-05-19
 
 ### Fixed
