@@ -456,22 +456,28 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.2'
-$Script:RunLog = Join-Path $env:TEMP ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+$Script:AppVersion = '1.1.4'
+$Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
+try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
+$Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     try {
+        if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null }
         $line = "[{0}] [{1}] {2}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Level, $Message
         [System.IO.File]::AppendAllText($Script:RunLog, $line)
     } catch {}
 }
 
-# Keep only the 10 most recent run logs in %TEMP%.
+# Keep only the 10 most recent run logs in the log folder.
 function Limit-RunLogs {
     try {
-        Get-ChildItem -Path $env:TEMP -Filter 'WinLogonAuditor_*.log' -ErrorAction SilentlyContinue |
+        Get-ChildItem -Path $Script:LogDir -Filter 'WinLogonAuditor_*.log' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -Skip 10 |
+            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+        # One-time migration: clear old logs that were written directly in %TEMP%.
+        Get-ChildItem -Path $env:TEMP -Filter 'WinLogonAuditor_*.log' -ErrorAction SilentlyContinue |
             ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
     } catch {}
 }
@@ -1024,7 +1030,7 @@ $Script:ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
 $Script:ctl.TxtMax.Text = "$([int]$Script:Config.MaxEventsPerCategory)"
 
 # Shared state for the background runspace
-$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Prog=0; Error=$null; Capped=$false; Excluded=0 })
+$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Prog=0; Error=$null; Warn=$null; Capped=$false; Excluded=0 })
 $Script:AllRows = @()
 $Script:DnsCache = @{}
 
@@ -1102,6 +1108,7 @@ function Start-Audit {
     $Script:Sync.Running  = $true
     $Script:Sync.Done     = $false
     $Script:Sync.Error    = $null
+    $Script:Sync.Warn     = $null
     $Script:Sync.Prog     = 0
     $Script:Sync.Status   = if ($allDc) { 'Discovering domain controllers...' } else { "Querying $typed ..." }
     $Script:ctl.TxtStatus.Text  = $Script:Sync.Status
@@ -1325,7 +1332,10 @@ function Start-Audit {
             }
 
             $sync.Rows = $rows
-            if ($errs -and $all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
+            if ($errs) {
+                if ($all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
+                else { $sync.Warn = "Incomplete: $($errs.Count) DC(s) failed/skipped - results may miss events from them: " + ($errs -join '  |  ') }
+            }
 
             # Pre-compute every view here (off the UI thread) using single
             # passes / hashtables, so binding on the UI thread is instant.
@@ -1412,6 +1422,9 @@ function Update-Views {
     }
     if ([int]$Script:Sync.Excluded -gt 0) {
         $w += "$($Script:Sync.Excluded) event(s) hidden by exclude lists."
+    }
+    if ($Script:Sync.Warn) {
+        $w += [string]$Script:Sync.Warn
     }
     if ($w) {
         $Script:ctl.TxtWarn.Text = ($w -join '  ')

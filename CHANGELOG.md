@@ -6,6 +6,19 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-05-19
+
+### Added
+- Partial-failure warning banner: when some DCs return but others
+  fail or time out, an amber banner now lists them ("Incomplete: 1
+  DC(s) failed/skipped ... eDC2: RPC server unavailable") so an
+  incomplete lockout sweep is never mistaken for a clean one.
+
+### Changed
+- Run logs now live in their own folder: %TEMP%\WinLogonAuditor\logs\
+  (still the 10 most recent). Old logs written directly in %TEMP% are
+  cleaned up automatically on first run.
+
 ## [1.1.3] - 2026-05-19
 
 ### Fixed
