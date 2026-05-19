@@ -6,6 +6,26 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Performance regression: queries over windows > 24h (e.g. Last 3 days)
+  timed out even with a high per-DC timeout. v1.1.0's hourly chunking
+  turned one query into ~24 remote Get-WinEvent calls per day per DC;
+  the per-call RPC overhead dominated. Reverted to a single server-side
+  filtered query per log (StartTime/EndTime + Id done on the DC,
+  -MaxEvents bounds the result) - the fast path used pre-1.1. Long
+  ranges complete in seconds again.
+
+### Added
+- Hover tooltips on every option (target, Discover/Servers, Query all
+  DCs, user, range, dates, max events, timeout, alt credentials, Run,
+  Export, Excludes, Auto-refresh, Watch, quick filter, Lockout
+  Investigator fields) and on each event-category checkbox, explaining
+  what it does with examples.
+
+### Removed
+- F6 internal hourly chunking (caused the regression above; the cap +
+  server-side time filter already bound long-window queries).
+
 ## [1.1.2] - 2026-05-19
 
 ### Added

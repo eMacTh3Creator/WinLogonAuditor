@@ -146,6 +146,21 @@ $Script:Groups = [ordered]@{
     'Reboots / shutdowns (1074,6008,41)'   = @(1074,6005,6006,6008,41)
 }
 
+# Tooltip text per category checkbox (keyed by the same label).
+$Script:GroupTips = @{
+    'Failed logons (4625)'                 = 'Bad logon attempts (wrong password, disabled, expired, etc.). The #1 signal for lockout hunting - shows the source IP/host and the failure reason.'
+    'Successful logons / approvals (4624)' = 'Successful sign-ins. Useful for "who logged in / from where", but very high volume on a DC - leave off unless you need it.'
+    'Account lockouts (4740)'              = 'The lockout event itself (logged on the DC). The app auto-correlates each to the bad attempt that caused it. Keep this ON for lockout investigations.'
+    'Account unlocked (4767)'              = 'An admin or process unlocked an account. Pairs with 4740 to see lock/unlock cycles.'
+    'Logoff / sign-out (4634,4647)'        = 'Sessions ending - normal sign-out / disconnect. Used by the Logout Analyzer to spot mass drop-offs.'
+    'RDP connect/disconnect (4778,4779)'   = 'Remote Desktop session reconnect/disconnect. Repeated disconnects often mean an idle/session-limit GPO or network drops.'
+    'Workstation lock/unlock (4800,4801)'  = 'Screen lock/unlock on a machine. Frequent locks usually mean a screensaver/lock GPO, not a problem.'
+    'Kerberos (4768,4769,4771)'            = 'Kerberos TGT/service-ticket requests and pre-auth failures (4771 = bad password via Kerberos). Key for tracing lockouts from domain-joined Windows clients.'
+    'NTLM validation (4776)'               = 'NTLM credential checks on the DC. 4776 carries the Source Workstation name - often the only thing that identifies the device when 4740 is blank. Enable for lockout tracing.'
+    'Explicit credentials (4648)'          = 'A logon made with explicit credentials (runas, mapped drive with /user, scheduled task). Common culprit for stale-password lockouts.'
+    'Reboots / shutdowns (1074,6008,41)'   = 'System log: planned restart (1074), unexpected shutdown (6008) and kernel-power crash (41). Explains "everyone got logged off at once".'
+}
+
 function Get-DecodedStatus {
     param($code)
     if ([string]::IsNullOrWhiteSpace($code)) { return '' }
@@ -328,50 +343,37 @@ function Invoke-AuditQuery {
     $rows   = New-Object System.Collections.Generic.List[object]
     $isLocal = $ComputerName -in @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')
 
-    # Chunk long windows (>24h) into <=1h slices, newest first, so one giant
-    # blocking RPC is avoided and the most recent events come back first.
-    $chunks = @()
-    if (($End - $Start).TotalHours -gt 24) {
-        $cEnd = $End
-        while ($cEnd -gt $Start) {
-            $cStart = $cEnd.AddHours(-1); if ($cStart -lt $Start) { $cStart = $Start }
-            $chunks += ,@($cStart, $cEnd)
-            $cEnd = $cStart
-        }
-    } else {
-        $chunks = ,@($Start, $End)
-    }
-
+    # One server-side filtered query per log. Get-WinEvent's FilterHashtable
+    # does the StartTime/EndTime/Id filtering on the DC and -MaxEvents bounds
+    # the result, so a single call is far faster than many time slices
+    # (per-call RPC overhead made >24h windows time out).
     $logs = @()
     if ($secIds.Count) { $logs += ,@('Security', $secIds) }
     if ($sysIds.Count) { $logs += ,@('System',   $sysIds) }
 
-    :outer foreach ($lg in $logs) {
-        foreach ($ch in $chunks) {
-            $remaining = $MaxEvents - $rows.Count
-            if ($remaining -le 0) { break outer }
-            $filter = @{ LogName=$lg[0]; Id=$lg[1]; StartTime=$ch[0]; EndTime=$ch[1] }
-            $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
-            if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
-            if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
-            try {
-                $raw = Get-WinEvent @params
-            } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
-                throw "Cannot read '$($lg[0])' on '$ComputerName': $($_.Exception.Message). " +
-                      "Ensure the account is in 'Event Log Readers' / local admin and that " +
-                      "Remote Event Log Management is allowed through the firewall."
-            } catch {
-                if ("$($_.Exception.Message)" -match 'No events were found') { continue }
-                throw $_
+    foreach ($lg in $logs) {
+        $remaining = $MaxEvents - $rows.Count
+        if ($remaining -le 0) { break }
+        $filter = @{ LogName=$lg[0]; Id=$lg[1]; StartTime=$Start; EndTime=$End }
+        $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
+        if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
+        if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
+        try {
+            $raw = Get-WinEvent @params
+        } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
+            throw "Cannot read '$($lg[0])' on '$ComputerName': $($_.Exception.Message). " +
+                  "Ensure the account is in 'Event Log Readers' / local admin and that " +
+                  "Remote Event Log Management is allowed through the firewall."
+        } catch {
+            if ("$($_.Exception.Message)" -match 'No events were found') { continue }
+            throw $_
+        }
+        foreach ($e in $raw) {
+            $row = ConvertTo-AuditRow -Evt $e
+            if ($UserFilter -and $UserFilter -ne '*') {
+                if ($row.User -notlike $UserFilter) { continue }
             }
-            foreach ($e in $raw) {
-                $row = ConvertTo-AuditRow -Evt $e
-                if ($UserFilter -and $UserFilter -ne '*') {
-                    if ($row.User -notlike $UserFilter) { continue }
-                }
-                $rows.Add($row)
-            }
-            if ($rows.Count -ge $MaxEvents) { break outer }
+            $rows.Add($row)
         }
     }
     return ($rows | Sort-Object Time -Descending)
@@ -684,14 +686,20 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
     <Border Grid.Row="0" Background="#FF272739" CornerRadius="6" Padding="10" Margin="0,0,0,8">
       <WrapPanel>
         <TextBlock Text="Target (DC/host):" Margin="0,0,6,0"/>
-        <ComboBox x:Name="CmbTarget" Width="190" IsEditable="True" Margin="0,0,4,0"/>
-        <Button x:Name="BtnDiscover" Content="Discover DCs" Background="#FF6B7280"/>
-        <Button x:Name="BtnManage" Content="Servers..." Background="#FF6B7280" Margin="0,0,12,0"/>
-        <CheckBox x:Name="ChkAllDc" Content="Query all DCs"/>
+        <ComboBox x:Name="CmbTarget" Width="190" IsEditable="True" Margin="0,0,4,0"
+                  ToolTip="The server to query (a domain controller or any host). Type a name/FQDN or pick a saved one, e.g. eDC1.ad.salus.edu. Ignored when 'Query all DCs' is ticked."/>
+        <Button x:Name="BtnDiscover" Content="Discover DCs" Background="#FF6B7280"
+                ToolTip="Find every domain controller in the domain and add them to the list, auto-selecting the PDC emulator (the best single target for lockouts). Tick 'Alt credentials' first if your logon can't read the DCs."/>
+        <Button x:Name="BtnManage" Content="Servers..." Background="#FF6B7280" Margin="0,0,12,0"
+                ToolTip="Add or remove servers in your saved target list (stored in config.json)."/>
+        <CheckBox x:Name="ChkAllDc" Content="Query all DCs"
+                  ToolTip="Query every discovered domain controller in parallel and merge the results. Best for lockouts (4740 lands on whichever DC processed it). Slower than a single target."/>
         <TextBlock Text="User (wildcards ok):" Margin="0,0,6,0"/>
-        <TextBox x:Name="TxtUser" Width="150" Text="*" Margin="0,0,14,0"/>
+        <TextBox x:Name="TxtUser" Width="150" Text="*" Margin="0,0,14,0"
+                 ToolTip="Filter by account name. * = all users. Wildcards allowed, e.g. jsmith  svc-*  *admin*"/>
         <TextBlock Text="Range:" Margin="0,0,6,0"/>
-        <ComboBox x:Name="CmbRange" Width="150" Margin="0,0,8,0">
+        <ComboBox x:Name="CmbRange" Width="150" Margin="0,0,8,0"
+                  ToolTip="How far back to look. Shorter ranges are much faster on busy DCs - use Last 1-8 hours for live incidents; pick 'Custom range' to set exact From/To dates.">
           <ComboBoxItem Content="Last 1 hour"/>
           <ComboBoxItem Content="Last 8 hours"/>
           <ComboBoxItem Content="Last 24 hours" IsSelected="True"/>
@@ -699,20 +707,28 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           <ComboBoxItem Content="Last 7 days"/>
           <ComboBoxItem Content="Custom range"/>
         </ComboBox>
-        <DatePicker x:Name="DtFrom" Width="120" Margin="0,0,4,0" IsEnabled="False"/>
-        <DatePicker x:Name="DtTo" Width="120" Margin="0,0,14,0" IsEnabled="False"/>
+        <DatePicker x:Name="DtFrom" Width="120" Margin="0,0,4,0" IsEnabled="False"
+                    ToolTip="Start date (enabled when Range = Custom range)."/>
+        <DatePicker x:Name="DtTo" Width="120" Margin="0,0,14,0" IsEnabled="False"
+                    ToolTip="End date, inclusive (enabled when Range = Custom range)."/>
         <TextBlock Text="Max events/DC:" Margin="0,0,6,0"/>
         <TextBox x:Name="TxtMax" Width="75" Text="100000" Margin="0,0,10,0"
-                 ToolTip="Cap per DC (applied per domain controller, not in aggregate)."/>
+                 ToolTip="Maximum events returned per DC (applied per controller, not in aggregate). If hit, an amber banner shows and you get the most recent N within the window. Lower it (e.g. 20000) for faster sweeps; raise it if you see 'CAP HIT'."/>
         <TextBlock Text="Timeout/DC (s):" Margin="0,0,6,0"/>
         <TextBox x:Name="TxtTimeout" Width="50" Text="45" Margin="0,0,14,0"
-                 ToolTip="If a DC takes longer than this it is skipped so the rest still return."/>
-        <CheckBox x:Name="ChkCred" Content="Alt credentials"/>
-        <Button x:Name="BtnQuery" Content="Run Query"/>
-        <Button x:Name="BtnExport" Content="Export CSV" Background="#FF6B7280"/>
-        <Button x:Name="BtnExcludes" Content="Excludes..." Background="#FF6B7280"/>
-        <CheckBox x:Name="ChkAuto" Content="Auto-refresh 60s"/>
-        <CheckBox x:Name="ChkWatch" Content="Watch" ToolTip="Continuously poll for new lockouts of watched users and toast/log them."/>
+                 ToolTip="Give up on a single DC after this many seconds and skip it so the others still return. Raise it (e.g. 120-300) for a busy PDC over a long range; a short Range is usually a better fix."/>
+        <CheckBox x:Name="ChkCred" Content="Alt credentials"
+                  ToolTip="Prompt for a different domain account to read the logs / discover DCs (use when your current logon lacks 'Event Log Readers' on the DCs)."/>
+        <Button x:Name="BtnQuery" Content="Run Query"
+                ToolTip="Run the query now with the settings above. Nothing is queried until you click this."/>
+        <Button x:Name="BtnExport" Content="Export CSV" Background="#FF6B7280"
+                ToolTip="Save the current results to a CSV (event-aware columns incl. FailureCode/Reason). Filename gets a _filtered suffix when exclude lists are active."/>
+        <Button x:Name="BtnExcludes" Content="Excludes..." Background="#FF6B7280"
+                ToolTip="Edit the noise filters: Users / Sources / DCs (wildcards ok, e.g. solarwinds  *$  10.5.121.*). Excluded rows are dropped from the grid, summary and export. Tip: right-click a row to mute it instantly."/>
+        <CheckBox x:Name="ChkAuto" Content="Auto-refresh 60s"
+                  ToolTip="Re-run the same query automatically every 60 seconds (handy for an active incident). Turn off for long multi-DC sweeps."/>
+        <CheckBox x:Name="ChkWatch" Content="Watch"
+                  ToolTip="Continuously poll for NEW lockouts of your watched users (config.json WatchUsers, or the Lockout Investigator username), pop a tray toast naming the likely source, and append %TEMP%\..\LockoutHunt_yyyyMMdd.csv - works in the background."/>
       </WrapPanel>
     </Border>
 
@@ -734,7 +750,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <DockPanel Grid.Row="0" Margin="0,4">
             <TextBlock Text="Quick filter:" DockPanel.Dock="Left" Margin="2,0,6,0"/>
-            <TextBox x:Name="TxtFilter" />
+            <TextBox x:Name="TxtFilter"
+                     ToolTip="Instantly narrows the rows already loaded (no re-query). Matches user, source host/IP, category, reason, event ID or DC. Example: type 0xC000006A or 4740 or a hostname."/>
           </DockPanel>
           <DataGrid x:Name="Grid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
                     Background="#FF1E1E2E" Foreground="#FFE6E6E6" GridLinesVisibility="Horizontal"
@@ -770,10 +787,13 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           </Grid.RowDefinitions>
           <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
             <TextBlock Text="Locked user:" Margin="0,0,6,0"/>
-            <TextBox x:Name="TxtLockUser" Width="170" Margin="0,0,10,0"/>
+            <TextBox x:Name="TxtLockUser" Width="170" Margin="0,0,10,0"
+                     ToolTip="The locked account to investigate, e.g. jsmith (partial match ok). This is also the user Watch mode monitors if WatchUsers isn't set in config.json."/>
             <TextBlock Text="Lookback (min):" Margin="0,0,6,0"/>
-            <TextBox x:Name="TxtLookback" Width="60" Text="60" Margin="0,0,10,0"/>
-            <Button x:Name="BtnLockGo" Content="Trace lockout source"/>
+            <TextBox x:Name="TxtLookback" Width="60" Text="60" Margin="0,0,10,0"
+                     ToolTip="How many minutes before now to scan for the lockout trail (4740 + preceding 4771/4625/4776). 60 is usually enough; widen if the lockout was a while ago."/>
+            <Button x:Name="BtnLockGo" Content="Trace lockout source"
+                    ToolTip="Live-query the selected target / all DCs for this user's lockouts and the bad-password attempts that preceded them, resolve source IPs to hostnames, and rank the offending devices with a plain-English verdict."/>
             <TextBlock Text="(queries the selected target/all-DCs live)" Margin="12,0,0,0" Foreground="#FF8A8FB0"/>
           </StackPanel>
           <Border Grid.Row="1" Background="#FF272739" CornerRadius="4" Padding="8" Margin="0,0,0,8">
@@ -927,6 +947,7 @@ foreach ($g in $Script:Groups.GetEnumerator()) {
     $cb.IsChecked = $true
     $cb.Tag       = $g.Value
     $cb.Foreground = 'White'
+    if ($Script:GroupTips.ContainsKey($g.Key)) { $cb.ToolTip = $Script:GroupTips[$g.Key] }
     $Script:ctl.PnlCats.Children.Add($cb) | Out-Null
     $Script:CatBoxes += $cb
 }
