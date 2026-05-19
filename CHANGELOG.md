@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.16] - 2026-05-19
+
 ### Fixed
 - Large pulls (Max events/DC = 100000) still hung in the
   "Sweeping all DCs" phase. Real bottleneck: PowerShell Remoting
@@ -359,7 +361,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.15...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.16...HEAD
+[1.1.16]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.15...v1.1.16
 [1.1.15]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.14...v1.1.15
 [1.1.14]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.13...v1.1.14
 [1.1.13]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.12...v1.1.13
