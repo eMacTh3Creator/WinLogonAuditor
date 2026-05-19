@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-05-19
+
 ### Fixed
 - "Query failed: Argument types do not match" when running a multi-DC
   query in the packaged exe. The per-DC cap was signalled via a [ref]
@@ -138,7 +140,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.6...v1.1.0
 [1.0.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.4...v1.0.5
