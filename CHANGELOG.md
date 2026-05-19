@@ -6,6 +6,19 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- All DCs timing out on broad multi-DC queries (e.g. 24h with Kerberos
+  4768/4769 selected). Root cause: the v1.1.0 cap raise to 100k events
+  combined with calling $Evt.FormatDescription() for every event - that
+  per-event provider rendering dominates at scale. The detail text is
+  now reconstructed from the already-parsed EventData (effectively
+  free); the slow call is gone. Raising the timeout didn't help because
+  the cost scaled with event volume, not wall time.
+
+### Added
+- Per-DC timing in the run log: raw events fetched and fetch seconds vs
+  convert seconds per log, so fetch-bound vs process-bound is obvious.
+
 ## [1.1.4] - 2026-05-19
 
 ### Added

@@ -320,7 +320,23 @@ function ConvertTo-AuditRow {
         AuthPkg     = $authPkg
         LogonProc   = $logonProc
         CallerComp  = $callerComp
-        Message     = ($Evt.FormatDescription())
+        # Lightweight reconstructed detail. Calling $Evt.FormatDescription()
+        # per event is extremely slow at scale (it dominated multi-DC,
+        # high-volume Kerberos queries) - we build the detail from the
+        # already-parsed EventData instead, which is effectively free.
+        Message     = (& {
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine("Event $id  -  $cat")
+            [void]$sb.AppendLine("Time:     $($Evt.TimeCreated)")
+            [void]$sb.AppendLine("Logged on: $($Evt.MachineName)")
+            if ($Evt.RecordId) { [void]$sb.AppendLine("RecordId: $($Evt.RecordId)") }
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('EventData:')
+            foreach ($k in ($data.Keys | Sort-Object)) {
+                $v = $data[$k]; if ($v -ne $null -and "$v" -ne '') { [void]$sb.AppendLine(("  {0,-22} {1}" -f $k, $v)) }
+            }
+            $sb.ToString()
+        })
     }
 }
 
@@ -351,6 +367,12 @@ function Invoke-AuditQuery {
     if ($secIds.Count) { $logs += ,@('Security', $secIds) }
     if ($sysIds.Count) { $logs += ,@('System',   $sysIds) }
 
+    $qlog = {
+        param($m)
+        if ($Script:QLog) {
+            try { [System.IO.File]::AppendAllText($Script:QLog, ("[{0}] [INFO] [dc:$($Script:QTag)] {1}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $m)) } catch {}
+        }
+    }
     foreach ($lg in $logs) {
         $remaining = $MaxEvents - $rows.Count
         if ($remaining -le 0) { break }
@@ -358,6 +380,7 @@ function Invoke-AuditQuery {
         $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
         if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
         if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
+        $swf = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $raw = Get-WinEvent @params
         } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
@@ -365,16 +388,22 @@ function Invoke-AuditQuery {
                   "Ensure the account is in 'Event Log Readers' / local admin and that " +
                   "Remote Event Log Management is allowed through the firewall."
         } catch {
-            if ("$($_.Exception.Message)" -match 'No events were found') { continue }
+            if ("$($_.Exception.Message)" -match 'No events were found') { & $qlog "$($lg[0]): 0 events"; continue }
             throw $_
         }
-        foreach ($e in $raw) {
+        $swf.Stop()
+        $rawArr = @($raw)
+        & $qlog "$($lg[0]): fetched $($rawArr.Count) raw in $([int]$swf.Elapsed.TotalSeconds)s; converting..."
+        $swp = [System.Diagnostics.Stopwatch]::StartNew()
+        foreach ($e in $rawArr) {
             $row = ConvertTo-AuditRow -Evt $e
             if ($UserFilter -and $UserFilter -ne '*') {
                 if ($row.User -notlike $UserFilter) { continue }
             }
             $rows.Add($row)
         }
+        $swp.Stop()
+        & $qlog "$($lg[0]): converted -> $($rows.Count) kept in $([int]$swp.Elapsed.TotalSeconds)s"
     }
     return ($rows | Sort-Object Time -Descending)
 }
@@ -456,7 +485,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.4'
+$Script:AppVersion = '1.1.5'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -1192,12 +1221,16 @@ function Start-Audit {
                     Set-Item function:Get-DecodedStatus    ([scriptblock]::Create($p[2]))
                     Set-Item function:Get-DecodedKerb      ([scriptblock]::Create($p[3]))
                     Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($p[4]))
+                    $Script:QLog = $qa.LogFile; $Script:QTag = $tgt
+                    clog "querying ids=[$($qa.EventIds -join ',')] max=$($qa.MaxEvents)"
+                    $swc = [System.Diagnostics.Stopwatch]::StartNew()
                     $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
                             -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
                             -MaxEvents $qa.MaxEvents -Credential $qa.Credential
+                    $swc.Stop()
                     $slot.Rows = @($r); $slot.Ok = $true
                     $slot.Capped = (@($r).Count -ge [int]$qa.MaxEvents)
-                    clog "child OK rows=$(@($r).Count) capped=$($slot.Capped)"
+                    clog "child OK rows=$(@($r).Count) capped=$($slot.Capped) elapsed=$([int]$swc.Elapsed.TotalSeconds)s"
                 } catch {
                     $stk = ('' + $_.ScriptStackTrace) -replace "`r?`n",' <<< '
                     $slot.Err = "$($_.Exception.GetType().Name): $($_.Exception.Message)  @ line $($_.InvocationInfo.ScriptLineNumber)"
