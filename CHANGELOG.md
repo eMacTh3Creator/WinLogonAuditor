@@ -6,6 +6,17 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- "Netlogon (DCs)" button in the Lockout Investigator. Reads
+  %windir%\debug\netlogon.log (+ .bak) on each selected DC over WinRM
+  and greps the locked user's SamLogon lines - Netlogon logging records
+  the REAL originating client for NTLM pass-through ("... from <MACHINE>
+  (via <SERVER>) Returns 0xC000006A"), which is the definitive source
+  when 4740/4776 only show a DC. Reports per-DC whether logging is
+  enabled (DBFlag) and, if not, the exact 'nltest /dbflag:0x2080ffff'
+  command to turn it on; summarises the distinct originating clients.
+  Background, 120s timeout, clear WinRM/rights error.
+
 ## [1.1.14] - 2026-05-19
 
 ### Fixed

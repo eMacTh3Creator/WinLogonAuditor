@@ -543,7 +543,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.14'
+$Script:AppVersion = '1.1.15'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -891,6 +891,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                      ToolTip="How many minutes before now to scan for the lockout trail (4740 + preceding 4771/4625/4776). 60 is usually enough; widen if the lockout was a while ago."/>
             <Button x:Name="BtnLockGo" Content="Trace lockout source"
                     ToolTip="Live-query the selected target / all DCs for this user's lockouts and the bad-password attempts that preceded them, resolve source IPs to hostnames, and rank the offending devices with a plain-English verdict."/>
+            <Button x:Name="BtnNetlogon" Content="Netlogon (DCs)" Background="#FF6B7280" Margin="6,0,0,0"
+                    ToolTip="Reads %windir%\debug\netlogon.log on each DC over WinRM and greps this user's SamLogon entries. Netlogon logging records the REAL originating client for NTLM pass-through (from &lt;machine&gt; via &lt;server&gt; Returns 0xC000006A) - the definitive source when 4740/4776 only show a DC. Also reports whether Netlogon logging is enabled per DC."/>
             <TextBlock Text="(queries the selected target/all-DCs live)" Margin="12,0,0,0" Foreground="#FF8A8FB0"/>
           </StackPanel>
           <Border Grid.Row="1" Background="#FF272739" CornerRadius="4" Padding="8" Margin="0,0,0,8">
@@ -2030,6 +2032,98 @@ $Script:ctl.BtnIdentify.Add_Click({ Invoke-Safe {
     $Script:IdSync.Start=[datetime]::Now
 } 'Identify host' })
 
+# ---- Netlogon log check: the authoritative pass-through source ----------
+$Script:NlSync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Report=$null; Err=$null })
+
+$Script:ctl.BtnNetlogon.Add_Click({ Invoke-Safe {
+    if ($Script:NlSync.Running) { return }
+    $u = $Script:ctl.TxtLockUser.Text.Trim()
+    if (-not $u) { $Script:ctl.TxtLockInfo.Text = 'Enter the locked username first.'; return }
+    if ($Script:ctl.ChkCred.IsChecked -and -not $Script:Cred) {
+        $Script:Cred = Get-Credential -Message "Domain credentials to read netlogon.log on the DCs"
+    }
+    $targets = Resolve-TraceTargets
+    $Script:NlSync.Running = $true; $Script:NlSync.Done = $false
+    $Script:NlSync.Err = $null; $Script:NlSync.Report = $null
+    $Script:ctl.TxtLockInfo.Text = "Reading netlogon.log for '$u' on $($targets -join ', ')..."
+    $Script:ctl.TxtStatus.Text   = "Netlogon check for '$u'..."
+    Set-Busy $true
+    Write-Log "Netlogon: user='$u' targets=$($targets -join ',')"
+    $rs = [runspacefactory]::CreateRunspace(); $rs.ThreadOptions='ReuseThread'; $rs.Open()
+    $rs.SessionStateProxy.SetVariable('nlsync', $Script:NlSync)
+    $rs.SessionStateProxy.SetVariable('np', @{ Targets=$targets; User=$u; Cred=$Script:Cred; LogFile=$Script:RunLog })
+    $w = {
+        $remote = {
+            param($User)
+            $o = [ordered]@{}
+            $o.Computer = $env:COMPUTERNAME
+            try { $o.DBFlag = '0x{0:X}' -f [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name DBFlag -ErrorAction Stop).DBFlag } catch { $o.DBFlag = $null }
+            $o.Files = @()
+            $hits = New-Object System.Collections.Generic.List[string]
+            foreach ($p in @((Join-Path $env:windir 'debug\netlogon.log'), (Join-Path $env:windir 'debug\netlogon.bak'))) {
+                if (Test-Path -LiteralPath $p) {
+                    $fi = Get-Item -LiteralPath $p
+                    $o.Files += [pscustomobject]@{ Path=$p; KB=[int]($fi.Length/1KB); LastWrite=$fi.LastWriteTime }
+                    try {
+                        foreach ($ln in (Get-Content -LiteralPath $p -Tail 12000 -ErrorAction Stop)) {
+                            if ($ln -match [regex]::Escape($User)) { [void]$hits.Add($ln) }
+                        }
+                    } catch {}
+                }
+            }
+            $o.Hits = @($hits | Select-Object -Last 300)
+            [pscustomobject]$o
+        }
+        try {
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine("Netlogon log check for user: $($np.User)")
+            [void]$sb.AppendLine(("=" * 78))
+            foreach ($t in @($np.Targets)) {
+                [void]$sb.AppendLine("")
+                [void]$sb.AppendLine("### $t")
+                try {
+                    $ic = @{ ComputerName=$t; ScriptBlock=$remote; ArgumentList=@($np.User); ErrorAction='Stop' }
+                    if ($np.Cred) { $ic['Credential'] = $np.Cred }
+                    $r = Invoke-Command @ic
+                    $enabled = ($r.DBFlag -and $r.DBFlag -ne '0x0')
+                    $recent  = $false
+                    foreach ($f in $r.Files) { if ($f.LastWrite -and ((Get-Date) - $f.LastWrite).TotalMinutes -lt 30) { $recent = $true } }
+                    [void]$sb.AppendLine("Netlogon logging: DBFlag=$(if($r.DBFlag){$r.DBFlag}else{'(not set)'})  " +
+                        $(if ($enabled) { 'ENABLED' } elseif ($recent) { 'writing (legacy/auto)' } else { 'NOT ENABLED' }))
+                    if (-not $r.Files) {
+                        [void]$sb.AppendLine("  No netlogon.log present. Enable on this DC (no reboot needed):")
+                        [void]$sb.AppendLine("    nltest /dbflag:0x2080ffff      (log: %windir%\debug\netlogon.log)")
+                    } else {
+                        foreach ($f in $r.Files) { [void]$sb.AppendLine("  $($f.Path)  $($f.KB) KB  last write $($f.LastWrite)") }
+                    }
+                    if ($r.Hits.Count) {
+                        [void]$sb.AppendLine("  --- SamLogon / lines mentioning '$($np.User)' (newest last) ---")
+                        foreach ($h in $r.Hits) { [void]$sb.AppendLine("  $h") }
+                        $froms = @($r.Hits | ForEach-Object { if ($_ -match '\bfrom\s+(\S+)') { $matches[1] } } | Sort-Object -Unique)
+                        if ($froms) { [void]$sb.AppendLine("  >>> Distinct originating clients (from): $($froms -join ', ')") }
+                    } else {
+                        [void]$sb.AppendLine("  (no lines for this user in the tail - widen window, ensure logging is on, or check the other DC)")
+                    }
+                } catch {
+                    [void]$sb.AppendLine("  ERROR: $($_.Exception.Message)  (WinRM + admin rights to read %windir%\debug needed)")
+                }
+            }
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("Netlogon 'from <MACHINE>' is the TRUE originating client even when 4740/4776")
+            [void]$sb.AppendLine("only show a DC (NTLM pass-through). '(via <SERVER>)' = the server that forwarded.")
+            $nlsync.Report = $sb.ToString()
+            try { [System.IO.File]::AppendAllText($np.LogFile, ("[{0}] [INFO] [netlogon] user=$($np.User) targets=$($np.Targets.Count)`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'))) } catch {}
+        } catch {
+            $nlsync.Err = "$($_.Exception.Message)"
+            try { [System.IO.File]::AppendAllText($np.LogFile, ("[{0}] [ERROR] [netlogon] $($_.Exception.Message)`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'))) } catch {}
+        } finally { $nlsync.Done = $true }
+    }
+    $ps=[powershell]::Create(); $ps.Runspace=$rs
+    $ps.AddScript($w) | Out-Null
+    $Script:NlSync.PS=$ps; $Script:NlSync.RS=$rs; $Script:NlSync.Handle=$ps.BeginInvoke()
+    $Script:NlSync.Start=[datetime]::Now
+} 'Netlogon check' })
+
 # Poll the runspace
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(400)
@@ -2112,6 +2206,30 @@ $lockTimer.Add_Tick({
                 if ($Script:IdSync.RS) { try { $Script:IdSync.PS.Dispose(); $Script:IdSync.RS.Close() } catch {} }
             } 'Identify result'
             $Script:IdSync.Running = $false
+            Set-Busy $false
+        }
+    }
+    # Netlogon-check poll (~120s safety timeout - multi-DC log reads)
+    if ($Script:NlSync.Running) {
+        $nlTo = $false
+        if ($Script:NlSync.Start -and (([datetime]::Now - $Script:NlSync.Start).TotalSeconds -gt 120) -and -not $Script:NlSync.Done) {
+            try { $Script:NlSync.PS.Stop() } catch {}
+            $Script:NlSync.Err = "Timed out after 120s reading netlogon.log (WinRM/rights on a DC?)."
+            $Script:NlSync.Done = $true; $nlTo = $true
+        }
+        if ($Script:NlSync.Done) {
+            Invoke-Safe {
+                try { if ($Script:NlSync.PS -and -not $nlTo) { $Script:NlSync.PS.EndInvoke($Script:NlSync.Handle) | Out-Null } } catch {}
+                if ($Script:NlSync.Err) {
+                    $Script:ctl.TxtLockInfo.Text = "Netlogon check failed: $($Script:NlSync.Err)"
+                    [System.Windows.MessageBox]::Show("$($Script:NlSync.Err)`n`nNeeds PowerShell Remoting (WinRM) and admin rights on the DC to read %windir%\debug\netlogon.log.",'Netlogon check','OK','Warning') | Out-Null
+                } else {
+                    $Script:ctl.TxtLockInfo.Text = 'Netlogon check complete - see report window.'
+                    Show-IdentifyReport -Text "$($Script:NlSync.Report)"
+                }
+                if ($Script:NlSync.RS) { try { $Script:NlSync.PS.Dispose(); $Script:NlSync.RS.Close() } catch {} }
+            } 'Netlogon result'
+            $Script:NlSync.Running = $false
             Set-Busy $false
         }
     }
