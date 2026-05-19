@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.12] - 2026-05-19
+
 ### Fixed
 - End-to-end now works (WinRM transport pulls real events fast). Final
   bug: when a summary tab had exactly one row (e.g. a single user when
@@ -301,7 +303,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.11...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.12...HEAD
+[1.1.12]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.11...v1.1.12
 [1.1.11]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.10...v1.1.11
 [1.1.10]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.9...v1.1.10
 [1.1.9]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.8...v1.1.9
