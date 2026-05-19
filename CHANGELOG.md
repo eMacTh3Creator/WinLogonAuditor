@@ -6,6 +6,19 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- All DCs still timing out even on an 8h, low-volume query: Get-WinEvent
+  never returned within the timeout because the 100,000 per-DC cap
+  streams the environment's active failed-logon (4625) storm over RPC
+  for every DC. Default "Max events/DC" lowered to 5000 (Get-WinEvent
+  returns newest-first and stops at the cap, so this is fast even on a
+  busy DC). The unusable 100000 value auto-persisted by earlier builds
+  is migrated down to 5000 on config load (still user-adjustable).
+
+### Added
+- Pre-fetch log line ("<log>: fetching (cap N, window)...") so a hang
+  inside the remote Get-WinEvent call is unambiguous in the run log.
+
 ## [1.1.5] - 2026-05-19
 
 ### Fixed

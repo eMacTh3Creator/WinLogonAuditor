@@ -349,10 +349,10 @@ function Invoke-AuditQuery {
         [datetime]$Start,
         [datetime]$End,
         [string]$UserFilter = '*',
-        [int]$MaxEvents = 100000,
+        [int]$MaxEvents = 5000,
         [pscredential]$Credential
     )
-    if ($MaxEvents -le 0) { $MaxEvents = 100000 }
+    if ($MaxEvents -le 0) { $MaxEvents = 5000 }
 
     $secIds = @($EventIds | Where-Object { $_ -in $Script:SecurityIds })
     $sysIds = @($EventIds | Where-Object { $_ -in $Script:SystemIds  })
@@ -380,6 +380,7 @@ function Invoke-AuditQuery {
         $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
         if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
         if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
+        & $qlog "$($lg[0]): fetching (cap $remaining, $($Start.ToString('MM-dd HH:mm'))..$($End.ToString('MM-dd HH:mm')))..."
         $swf = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $raw = Get-WinEvent @params
@@ -430,7 +431,7 @@ function Get-AuditConfig {
     # Additive defaults - old config.json files keep working.
     $def = [pscustomobject]@{
         Servers = @(); LastTarget = ''; QueryAllDcs = $true
-        MaxEventsPerCategory = 100000; LookbackMinutes = 60
+        MaxEventsPerCategory = 5000; LookbackMinutes = 60
         WatchInterval = 30; WatchUsers = @()
         Excludes = (New-ExcludesObject $null)
     }
@@ -440,7 +441,10 @@ function Get-AuditConfig {
             if (-not $c.Servers)                 { $c | Add-Member Servers @() -Force }
             if ($null -eq $c.LastTarget)         { $c | Add-Member LastTarget '' -Force }
             if ($null -eq $c.QueryAllDcs)        { $c | Add-Member QueryAllDcs $false -Force }
-            if (-not $c.MaxEventsPerCategory)    { $c | Add-Member MaxEventsPerCategory 100000 -Force }
+            if (-not $c.MaxEventsPerCategory)    { $c | Add-Member MaxEventsPerCategory 5000 -Force }
+            # Migrate the old unusable 100000 default (auto-persisted by
+            # earlier builds) down to the responsive default.
+            if ([int]$c.MaxEventsPerCategory -ge 100000) { $c.MaxEventsPerCategory = 5000 }
             if (-not $c.LookbackMinutes)         { $c | Add-Member LookbackMinutes 60 -Force }
             if (-not $c.WatchInterval)           { $c | Add-Member WatchInterval 30 -Force }
             if ($null -eq $c.WatchUsers)         { $c | Add-Member WatchUsers @() -Force }
@@ -485,7 +489,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.5'
+$Script:AppVersion = '1.1.6'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -747,8 +751,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
         <DatePicker x:Name="DtTo" Width="120" Margin="0,0,14,0" IsEnabled="False"
                     ToolTip="End date, inclusive (enabled when Range = Custom range)."/>
         <TextBlock Text="Max events/DC:" Margin="0,0,6,0"/>
-        <TextBox x:Name="TxtMax" Width="75" Text="100000" Margin="0,0,10,0"
-                 ToolTip="Maximum events returned per DC (applied per controller, not in aggregate). If hit, an amber banner shows and you get the most recent N within the window. Lower it (e.g. 20000) for faster sweeps; raise it if you see 'CAP HIT'."/>
+        <TextBox x:Name="TxtMax" Width="75" Text="5000" Margin="0,0,10,0"
+                 ToolTip="Most recent N events per DC within the window (newest-first). Default 5000 returns fast even on a busy DC. In a noisy environment (e.g. an active failed-logon storm) a high value like 100000 may not finish before the per-DC timeout - keep it low and use a short Range and/or Excludes to mute the noise source instead. Amber banner + 'CAP HIT' shows when the cap is reached."/>
         <TextBlock Text="Timeout/DC (s):" Margin="0,0,6,0"/>
         <TextBox x:Name="TxtTimeout" Width="50" Text="45" Margin="0,0,14,0"
                  ToolTip="Give up on a single DC after this many seconds and skip it so the others still return. Raise it (e.g. 120-300) for a busy PDC over a long range; a short Range is usually a better fix."/>
@@ -1099,8 +1103,8 @@ function Start-Audit {
     }
     if (-not $Script:ctl.ChkCred.IsChecked) { $Script:Cred = $null }
 
-    $maxN = 100000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
-    if ($maxN -le 0) { $maxN = 100000 }
+    $maxN = 5000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
+    if ($maxN -le 0) { $maxN = 5000 }
     $toN  = 45;   [int]::TryParse($Script:ctl.TxtTimeout.Text, [ref]$toN) | Out-Null
     if ($toN -lt 5) { $toN = 5 }
     $Script:Config.MaxEventsPerCategory = $maxN
