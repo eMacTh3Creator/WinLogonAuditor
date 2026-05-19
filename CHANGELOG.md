@@ -6,6 +6,21 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- DC-aware annotation: when a row's Source IP/Host is one of your
+  domain controllers (resolved from the discovered DC list), a "Note"
+  column flags it as NTLM pass-through and points to the true origin
+  ("DC eDC1 - NTLM passthrough; true origin = <NTLM Wks>"). DCs are no
+  longer mistaken for the attacker.
+- "NTLM Wks" column: the 4776/4625 Source Workstation - the real
+  machine behind a pass-through lockout - shown as its own field.
+- "Identify host" button (Events tab): inspects the selected row's
+  source (or its NTLM Source Workstation for pass-through) over WinRM
+  and reports the services and scheduled tasks running as domain/user
+  accounts plus that host's recent failed logons - i.e. exactly where
+  a stale credential would be hiding - with the locked user's matches
+  flagged. 75s safety timeout; clear error if WinRM is unavailable.
+
 ## [1.1.12] - 2026-05-19
 
 ### Fixed

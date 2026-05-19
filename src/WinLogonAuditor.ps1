@@ -320,6 +320,11 @@ function ConvertTo-AuditRow {
         AuthPkg     = $authPkg
         LogonProc   = $logonProc
         CallerComp  = $callerComp
+        # The machine that originated an NTLM logon (4776/4625). For
+        # pass-through this is the true origin even when the network
+        # address shows a DC.
+        NtlmWks     = $(if ($id -eq 4776) { $data['Workstation'] } elseif ($id -eq 4625) { $data['WorkstationName'] } else { '' })
+        SrcNote     = ''   # filled in by the worker when source is a known DC
         # Lightweight reconstructed detail. Calling $Evt.FormatDescription()
         # per event is extremely slow at scale (it dominated multi-DC,
         # high-volume Kerberos queries) - we build the detail from the
@@ -542,7 +547,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.12'
+$Script:AppVersion = '1.1.13'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -842,6 +847,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <DockPanel Grid.Row="0" Margin="0,4">
             <TextBlock Text="Quick filter:" DockPanel.Dock="Left" Margin="2,0,6,0"/>
+            <Button x:Name="BtnIdentify" DockPanel.Dock="Right" Content="Identify host" Background="#FF6B7280"
+                    ToolTip="Inspect the selected row's source host over WinRM: services and scheduled tasks running as domain accounts (the usual stale-credential culprits) plus its recent failed logons. For NTLM-passthrough rows it targets the NTLM Source Workstation, not the DC."/>
             <TextBox x:Name="TxtFilter"
                      ToolTip="Instantly narrows the rows already loaded (no re-query). Matches user, source host/IP, category, reason, event ID or DC. Example: type 0xC000006A or 4740 or a hostname."/>
           </DockPanel>
@@ -859,7 +866,9 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
               <DataGridTextColumn Header="Source Host" Binding="{Binding SourceHost}" Width="130"/>
               <DataGridTextColumn Header="Source IP" Binding="{Binding SourceIP}" Width="120"/>
               <DataGridTextColumn Header="Logon Type" Binding="{Binding LogonType}" Width="170"/>
-              <DataGridTextColumn Header="Reason / Detail" Binding="{Binding Reason}" Width="260"/>
+              <DataGridTextColumn Header="NTLM Wks" Binding="{Binding NtlmWks}" Width="120"/>
+              <DataGridTextColumn Header="Reason / Detail" Binding="{Binding Reason}" Width="240"/>
+              <DataGridTextColumn Header="Note" Binding="{Binding SrcNote}" Width="230"/>
               <DataGridTextColumn Header="Logged On" Binding="{Binding LoggedOn}" Width="120"/>
             </DataGrid.Columns>
           </DataGrid>
@@ -1446,6 +1455,47 @@ function Start-Audit {
             }
             wlog "dns: resolved $dnsDone/$($distinctIps.Count) distinct IPs in $([int]$dnsSW.Elapsed.TotalSeconds)s"
 
+            # --- DC-aware annotation -------------------------------------
+            # A failed logon whose Source is a DC almost always means NTLM
+            # pass-through: the real origin is the 4776 Source Workstation,
+            # not the DC. Flag those rows so the DC isn't mistaken for the
+            # culprit.
+            $phase = 'dcnote'
+            $dcNames = @{}   # lower short/fqdn name -> display name
+            $dcIps   = @{}   # ip -> display name
+            foreach ($t in @($targets)) {
+                if (-not $t) { continue }
+                $disp  = $t
+                $short = ($t -split '\.')[0]
+                $dcNames[$t.ToLower()]     = $disp
+                $dcNames[$short.ToLower()] = $disp
+                try {
+                    foreach ($a in [System.Net.Dns]::GetHostAddresses($t)) {
+                        if ($a.AddressFamily -eq 'InterNetwork') { $dcIps["$($a.IPAddressToString)"] = $disp }
+                    }
+                } catch {}
+            }
+            if ($dcNames.Count -or $dcIps.Count) {
+                foreach ($x in $rows) {
+                    $hit = $null
+                    $ipOnly = ("$($x.SourceIP)" -replace ' .*$','')
+                    if ($ipOnly -and $dcIps.ContainsKey($ipOnly)) { $hit = $dcIps[$ipOnly] }
+                    elseif ($x.SourceHost) {
+                        $sh = "$($x.SourceHost)".ToLower(); $shs = ($sh -split '\.')[0]
+                        if ($dcNames.ContainsKey($sh))  { $hit = $dcNames[$sh] }
+                        elseif ($dcNames.ContainsKey($shs)) { $hit = $dcNames[$shs] }
+                    }
+                    if ($hit) {
+                        $x.SrcNote = "DC $hit - NTLM passthrough"
+                        if ($x.EventId -in 4625,4776,4771 -and -not $x.NtlmWks) {
+                            $x.SrcNote += "; true origin masked (check on-DC services/tasks)"
+                        } elseif ($x.NtlmWks) {
+                            $x.SrcNote += "; true origin = $($x.NtlmWks)"
+                        }
+                    }
+                }
+            }
+
             $sync.Rows = $rows
             if ($errs) {
                 if ($all.Count -eq 0) { $sync.Error = ($errs -join "`n") }
@@ -1557,7 +1607,7 @@ function Apply-Filter {
     $view = $Script:AllRows
     if ($f) {
         $view = $view | Where-Object {
-            "$($_.User) $($_.SourceHost) $($_.SourceIP) $($_.Category) $($_.Reason) $($_.EventId) $($_.LoggedOn)" -like "*$f*"
+            "$($_.User) $($_.SourceHost) $($_.SourceIP) $($_.NtlmWks) $($_.Category) $($_.Reason) $($_.SrcNote) $($_.EventId) $($_.LoggedOn)" -like "*$f*"
         }
     }
     $Script:ctl.Grid.ItemsSource = @($view)
@@ -1823,6 +1873,139 @@ $Script:ctl.BtnLockGo.Add_Click({ Invoke-Safe {
     $Script:LockSync.PS=$ps; $Script:LockSync.RS=$rs; $Script:LockSync.Handle=$ps.BeginInvoke()
 } 'Lockout trace' })
 
+# ---- Identify host: inspect a source machine for stale-credential use ----
+$Script:IdSync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Report=$null; Err=$null; Host='' })
+
+function Show-IdentifyReport {
+    param([string]$Text)
+    [xml]$rx = @"
+<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Title='Identify host' Height='620' Width='900' WindowStartupLocation='CenterOwner'
+        Background='#FF1E1E2E'>
+  <Grid Margin='10'>
+    <Grid.RowDefinitions><RowDefinition Height='*'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>
+    <TextBox x:Name='Txt' Grid.Row='0' IsReadOnly='True' FontFamily='Consolas' FontSize='12'
+             Background='#FF15151F' Foreground='#FFD6E0FF' TextWrapping='NoWrap'
+             VerticalScrollBarVisibility='Auto' HorizontalScrollBarVisibility='Auto'/>
+    <StackPanel Grid.Row='1' Orientation='Horizontal' HorizontalAlignment='Right' Margin='0,8,0,0'>
+      <Button x:Name='Copy' Content='Copy' Width='90' Background='#FF6B7280' Foreground='White' Padding='8,4' Margin='0,0,6,0'/>
+      <Button x:Name='Ok' Content='Close' Width='90' Background='#FF3B82F6' Foreground='White' Padding='8,4'/>
+    </StackPanel>
+  </Grid>
+</Window>
+"@
+    $rw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $rx))
+    $rw.Owner = $Script:Win
+    $rw.FindName('Txt').Text = $Text
+    $rw.FindName('Copy').Add_Click({ try { [System.Windows.Clipboard]::SetText($Text) } catch {} })
+    $rw.FindName('Ok').Add_Click({ $rw.Close() })
+    $rw.ShowDialog() | Out-Null
+}
+
+$Script:ctl.BtnIdentify.Add_Click({ Invoke-Safe {
+    if ($Script:IdSync.Running) { return }
+    $sel = $Script:ctl.Grid.SelectedItem
+    if (-not $sel) { $Script:ctl.TxtStatus.Text = 'Select a row first (Events grid), then Identify host.'; return }
+    # Prefer the true NTLM origin; fall back to source host, then IP.
+    $tgt = $null
+    if ($sel.NtlmWks -and $sel.NtlmWks -ne '-') { $tgt = "$($sel.NtlmWks)" }
+    elseif ($sel.SourceHost) { $tgt = "$($sel.SourceHost)" }
+    else { $tgt = ("$($sel.SourceIP)" -replace ' .*$','') }
+    $tgt = ($tgt -replace '^\\\\','').Trim()
+    if (-not $tgt -or $tgt -in '-','::1','127.0.0.1') {
+        $Script:ctl.TxtStatus.Text = 'No usable source host/IP on the selected row.'; return
+    }
+    if ($Script:ctl.ChkCred.IsChecked -and -not $Script:Cred) {
+        $Script:Cred = Get-Credential -Message "Domain credentials to inspect $tgt"
+    }
+    $who = "$($sel.User)"
+    $Script:IdSync.Running = $true; $Script:IdSync.Done = $false
+    $Script:IdSync.Err = $null; $Script:IdSync.Report = $null; $Script:IdSync.Host = $tgt
+    $Script:ctl.TxtStatus.Text = "Identifying $tgt (services / scheduled tasks / recent failures)..."
+    Set-Busy $true
+    Write-Log "IdentifyHost: target='$tgt' user='$who'"
+    $rs = [runspacefactory]::CreateRunspace(); $rs.ThreadOptions='ReuseThread'; $rs.Open()
+    $rs.SessionStateProxy.SetVariable('isync', $Script:IdSync)
+    $rs.SessionStateProxy.SetVariable('idp', @{ Host=$tgt; User=$who; Cred=$Script:Cred; LogFile=$Script:RunLog })
+    $w = {
+        $remote = {
+            param($User)
+            $r = [ordered]@{}
+            $r.Computer = $env:COMPUTERNAME
+            $builtIn = @('LocalSystem','NT AUTHORITY\SYSTEM','NT AUTHORITY\LocalService',
+                         'NT AUTHORITY\NetworkService','LocalService','NetworkService')
+            $r.Services = @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+                Where-Object { $_.StartName -and $_.StartName -notin $builtIn } |
+                Select-Object Name, StartName, State, StartMode |
+                Sort-Object StartName)
+            $r.Tasks = @()
+            try {
+                $r.Tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+                        $_.Principal.UserId -and $_.Principal.UserId -notmatch '^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE|Users|Administrators|Authenticated Users|INTERACTIVE|.*\\(SYSTEM|LocalService|NetworkService))$'
+                    } | Select-Object @{n='Task';e={ "$($_.TaskPath)$($_.TaskName)" }},
+                                       @{n='RunAs';e={ $_.Principal.UserId }}, State)
+            } catch {}
+            $r.RecentFails = @()
+            try {
+                $r.RecentFails = @(Get-WinEvent -FilterHashtable @{LogName='Security';Id=4625} -MaxEvents 15 -ErrorAction Stop |
+                    ForEach-Object {
+                        $x=[xml]$_.ToXml()
+                        $d=@{}; foreach($n in $x.Event.EventData.Data){ if($n.Name){ $d[$n.Name]="$($n.'#text')" } }
+                        [pscustomobject]@{ Time=$_.TimeCreated; User=$d['TargetUserName']; From=$d['IpAddress']; Wks=$d['WorkstationName']; Proc=$d['ProcessName'] }
+                    })
+            } catch {}
+            [pscustomobject]$r
+        }
+        try {
+            $ic = @{ ComputerName=$idp.Host; ScriptBlock=$remote; ArgumentList=@($idp.User); ErrorAction='Stop' }
+            if ($idp.Cred) { $ic['Credential'] = $idp.Cred }
+            $res = Invoke-Command @ic
+
+            $sbk = New-Object System.Text.StringBuilder
+            [void]$sbk.AppendLine("Identify host: $($idp.Host)   (resolved on: $($res.Computer))")
+            [void]$sbk.AppendLine(("=" * 70))
+            $u = "$($idp.User)"
+            [void]$sbk.AppendLine("")
+            [void]$sbk.AppendLine("SERVICES running as a non-builtin account  (stale password here = lockouts):")
+            if ($res.Services.Count) {
+                foreach ($s in $res.Services) {
+                    $flag = if ($u -and "$($s.StartName)" -like "*$u*") { '  <<< MATCHES LOCKED USER' } else { '' }
+                    [void]$sbk.AppendLine(("  [{0,-8}] {1,-28} as {2}{3}" -f $s.State, $s.Name, $s.StartName, $flag))
+                }
+            } else { [void]$sbk.AppendLine("  (none / not readable)") }
+            [void]$sbk.AppendLine("")
+            [void]$sbk.AppendLine("SCHEDULED TASKS running as a domain/user account:")
+            if ($res.Tasks.Count) {
+                foreach ($t in $res.Tasks) {
+                    $flag = if ($u -and "$($t.RunAs)" -like "*$u*") { '  <<< MATCHES LOCKED USER' } else { '' }
+                    [void]$sbk.AppendLine(("  [{0,-8}] {1}  as {2}{3}" -f $t.State, $t.Task, $t.RunAs, $flag))
+                }
+            } else { [void]$sbk.AppendLine("  (none / not readable)") }
+            [void]$sbk.AppendLine("")
+            [void]$sbk.AppendLine("RECENT FAILED LOGONS on this host (newest 15):")
+            if ($res.RecentFails.Count) {
+                foreach ($f in $res.RecentFails) {
+                    [void]$sbk.AppendLine(("  {0}  user={1}  from={2}  wks={3}  proc={4}" -f $f.Time, $f.User, $f.From, $f.Wks, $f.Proc))
+                }
+            } else { [void]$sbk.AppendLine("  (none / not readable)") }
+            [void]$sbk.AppendLine("")
+            [void]$sbk.AppendLine("Tip: an entry 'as <domain\\$u>' (or a service/task whose saved")
+            [void]$sbk.AppendLine("password is stale) is the lockout source. Reset its stored")
+            [void]$sbk.AppendLine("password, or fix the mapped drive / cached credential on this host.")
+            $isync.Report = $sbk.ToString()
+            try { [System.IO.File]::AppendAllText($idp.LogFile, ("[{0}] [INFO] [identify] $($idp.Host): svc=$($res.Services.Count) tasks=$($res.Tasks.Count) fails=$($res.RecentFails.Count)`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'))) } catch {}
+        } catch {
+            $isync.Err = "$($_.Exception.Message)"
+            try { [System.IO.File]::AppendAllText($idp.LogFile, ("[{0}] [ERROR] [identify] $($idp.Host): $($_.Exception.Message)`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'))) } catch {}
+        } finally { $isync.Done = $true }
+    }
+    $ps=[powershell]::Create(); $ps.Runspace=$rs
+    $ps.AddScript($w) | Out-Null
+    $Script:IdSync.PS=$ps; $Script:IdSync.RS=$rs; $Script:IdSync.Handle=$ps.BeginInvoke()
+    $Script:IdSync.Start=[datetime]::Now
+} 'Identify host' })
+
 # Poll the runspace
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(400)
@@ -1883,6 +2066,30 @@ $lockTimer.Add_Tick({
         } 'Trace result'
         $Script:LockSync.Running = $false
         Set-Busy $false
+    }
+    # Identify-host poll (with a ~75s safety timeout)
+    if ($Script:IdSync.Running) {
+        $idTimedOut = $false
+        if ($Script:IdSync.Start -and (([datetime]::Now - $Script:IdSync.Start).TotalSeconds -gt 75) -and -not $Script:IdSync.Done) {
+            try { $Script:IdSync.PS.Stop() } catch {}
+            $Script:IdSync.Err = "Timed out after 75s contacting '$($Script:IdSync.Host)' (WinRM not enabled/reachable on that host?)."
+            $Script:IdSync.Done = $true; $idTimedOut = $true
+        }
+        if ($Script:IdSync.Done) {
+            Invoke-Safe {
+                try { if ($Script:IdSync.PS -and -not $idTimedOut) { $Script:IdSync.PS.EndInvoke($Script:IdSync.Handle) | Out-Null } } catch {}
+                if ($Script:IdSync.Err) {
+                    $Script:ctl.TxtStatus.Text = "Identify failed: $($Script:IdSync.Err)"
+                    [System.Windows.MessageBox]::Show("Could not inspect '$($Script:IdSync.Host)':`n`n$($Script:IdSync.Err)`n`nNeeds PowerShell Remoting (WinRM) on that host and rights to read its services/tasks.",'Identify host','OK','Warning') | Out-Null
+                } else {
+                    $Script:ctl.TxtStatus.Text = "Identify host: $($Script:IdSync.Host) - see report."
+                    Show-IdentifyReport -Text "$($Script:IdSync.Report)"
+                }
+                if ($Script:IdSync.RS) { try { $Script:IdSync.PS.Dispose(); $Script:IdSync.RS.Close() } catch {} }
+            } 'Identify result'
+            $Script:IdSync.Running = $false
+            Set-Busy $false
+        }
     }
 })
 $lockTimer.Start()
