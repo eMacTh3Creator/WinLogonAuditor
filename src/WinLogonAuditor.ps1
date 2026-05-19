@@ -325,22 +325,18 @@ function ConvertTo-AuditRow {
         # address shows a DC.
         NtlmWks     = $(if ($id -eq 4776) { $data['Workstation'] } elseif ($id -eq 4625) { $data['WorkstationName'] } else { '' })
         SrcNote     = ''   # filled in by the worker when source is a known DC
-        # Lightweight reconstructed detail. Calling $Evt.FormatDescription()
-        # per event is extremely slow at scale (it dominated multi-DC,
-        # high-volume Kerberos queries) - we build the detail from the
-        # already-parsed EventData instead, which is effectively free.
+        RecordId    = "$($Evt.RecordId)"
+        # Compact subject/target only. A full EventData dump per row,
+        # multiplied by 100k events x 4 DCs and serialized back over
+        # WinRM, is what made large pulls hang - the detail pane is
+        # rebuilt from the decoded fields on row-select instead.
         Message     = (& {
-            $sb = New-Object System.Text.StringBuilder
-            [void]$sb.AppendLine("Event $id  -  $cat")
-            [void]$sb.AppendLine("Time:     $($Evt.TimeCreated)")
-            [void]$sb.AppendLine("Logged on: $($Evt.MachineName)")
-            if ($Evt.RecordId) { [void]$sb.AppendLine("RecordId: $($Evt.RecordId)") }
-            [void]$sb.AppendLine('')
-            [void]$sb.AppendLine('EventData:')
-            foreach ($k in ($data.Keys | Sort-Object)) {
-                $v = $data[$k]; if ($v -ne $null -and "$v" -ne '') { [void]$sb.AppendLine(("  {0,-22} {1}" -f $k, $v)) }
-            }
-            $sb.ToString()
+            $bits = @()
+            if ($data['SubjectUserName']) { $bits += "Subject=$($data['SubjectDomainName'])\$($data['SubjectUserName'])" }
+            if ($data['ProcessName'])     { $bits += "Process=$($data['ProcessName'])" }
+            if ($data['ServiceName'])     { $bits += "Service=$($data['ServiceName'])" }
+            if ($data['TargetServerName']){ $bits += "TargetServer=$($data['TargetServerName'])" }
+            $bits -join '  |  '
         })
     }
 }
@@ -547,7 +543,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.13'
+$Script:AppVersion = '1.1.14'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -1610,11 +1606,22 @@ function Apply-Filter {
             "$($_.User) $($_.SourceHost) $($_.SourceIP) $($_.NtlmWks) $($_.Category) $($_.Reason) $($_.SrcNote) $($_.EventId) $($_.LoggedOn)" -like "*$f*"
         }
     }
-    $Script:ctl.Grid.ItemsSource = @($view)
+    $view = @($view)
+    $total = $view.Count
+    # The grid itself is the only thing that struggles past a few tens of
+    # thousands of rows; AllRows keeps everything for CSV export and the
+    # summary tabs, so a big pull still works - we just cap what is bound
+    # to the visible grid.
+    $gridMax = 50000
+    $shown = $view
+    $trunc = $false
+    if ($total -gt $gridMax) { $shown = $view[0..($gridMax-1)]; $trunc = $true }
+    $Script:ctl.Grid.ItemsSource = $shown
     $tgtLbl = if ($Script:ctl.ChkAllDc.IsChecked) { 'all DCs' } else { $Script:ctl.CmbTarget.Text }
     $exTxt  = if ([int]$Script:Sync.Excluded -gt 0) { "  |  $($Script:Sync.Excluded) excluded" } else { '' }
     $capTxt = if ($Script:Sync.Capped) { '  |  CAP HIT' } else { '' }
-    $Script:ctl.TxtStatus.Text = "{0} events  |  target {1}{2}{3}  |  {4}" -f @($view).Count, $tgtLbl, $exTxt, $capTxt, (Get-Date -Format 'HH:mm:ss')
+    $shownTxt = if ($trunc) { "showing newest $gridMax of $total (Export CSV / Summary cover all)" } else { "$total events" }
+    $Script:ctl.TxtStatus.Text = "{0}  |  target {1}{2}{3}  |  {4}" -f $shownTxt, $tgtLbl, $exTxt, $capTxt, (Get-Date -Format 'HH:mm:ss')
 }
 
 # --- Events / wiring ---
@@ -1766,7 +1773,24 @@ $Script:ctl.Grid.ContextMenu = $Script:GridMenu
 $Script:ctl.TxtFilter.Add_TextChanged({ Apply-Filter })
 $Script:ctl.Grid.Add_SelectionChanged({
     $sel = $Script:ctl.Grid.SelectedItem
-    if ($sel) { $Script:ctl.TxtDetail.Text = $sel.Message }
+    if ($sel) {
+        $d = New-Object System.Text.StringBuilder
+        [void]$d.AppendLine("Event $($sel.EventId)  -  $($sel.Category)   [$($sel.Result)]")
+        [void]$d.AppendLine("Time:         $($sel.TimeStr)")
+        [void]$d.AppendLine("Logged on DC: $($sel.LoggedOn)   RecordId: $($sel.RecordId)")
+        [void]$d.AppendLine("User:         $($sel.Domain)\$($sel.User)")
+        [void]$d.AppendLine("Source host:  $($sel.SourceHost)")
+        [void]$d.AppendLine("Source IP:    $($sel.SourceIP)")
+        if ($sel.NtlmWks)    { [void]$d.AppendLine("NTLM Wks:     $($sel.NtlmWks)   (true NTLM origin)") }
+        if ($sel.CallerComp) { [void]$d.AppendLine("Caller comp:  $($sel.CallerComp)") }
+        [void]$d.AppendLine("Logon type:   $($sel.LogonType)")
+        [void]$d.AppendLine("Auth pkg:     $($sel.AuthPkg)   Logon proc: $($sel.LogonProc)")
+        if ($sel.FailureCode) { [void]$d.AppendLine("Failure:      $($sel.FailureCode)  $($sel.FailureReason)") }
+        [void]$d.AppendLine("Reason:       $($sel.Reason)")
+        if ($sel.SrcNote)  { [void]$d.AppendLine("Note:         $($sel.SrcNote)") }
+        if ($sel.Message)  { [void]$d.AppendLine("More:         $($sel.Message)") }
+        $Script:ctl.TxtDetail.Text = $d.ToString()
+    }
 })
 $Script:ctl.BtnExport.Add_Click({ Invoke-Safe {
     if (-not $Script:AllRows) { $Script:ctl.TxtStatus.Text='Nothing to export - run a query first.'; return }

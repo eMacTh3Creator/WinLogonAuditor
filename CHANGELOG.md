@@ -6,6 +6,17 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Large pulls (e.g. Max events/DC = 100000) hung. Two costs scaled
+  with volume: every row carried a full reconstructed EventData dump
+  that was serialized back over WinRM (100k x 4 DCs), and the WPF grid
+  then had to bind ~400k rows. The heavy per-row Message is replaced
+  with a tiny summary (the detail pane is rebuilt from the decoded
+  fields on row-select), and the grid now binds at most the newest
+  50,000 rows while CSV export and the Summary tabs still cover the
+  full set ("showing newest 50000 of N" in the status bar). Big
+  forensic pulls now complete; use Export CSV for the entire set.
+
 ## [1.1.13] - 2026-05-19
 
 ### Added
