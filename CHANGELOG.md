@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.10] - 2026-05-19
+
 ### Fixed
 - PSRemoting now works AND returns data. v1.1.9 connected to every DC
   fast (no more hang) but returned 0 rows: Invoke-Command -ArgumentList
@@ -278,7 +280,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.9...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.10...HEAD
+[1.1.10]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.9...v1.1.10
 [1.1.9]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.8...v1.1.9
 [1.1.8]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.7...v1.1.8
 [1.1.7]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.6...v1.1.7
