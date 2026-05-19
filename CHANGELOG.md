@@ -6,6 +6,19 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Large pulls (Max events/DC = 100000) still hung in the
+  "Sweeping all DCs" phase. Real bottleneck: PowerShell Remoting
+  serializing tens/hundreds of thousands of rich row objects back
+  from each DC. The on-DC engine now returns the result as a single
+  CSV string (one big string serializes far faster/smaller than 100k
+  object graphs); the client re-parses with ConvertFrom-Csv and
+  re-types EventId/Time. Also replaced the per-event [xml] DOM parse
+  with a regex EventData extract (same output, lighter). The per-DC
+  log line now reports fetch+convert vs reparse seconds so big-pull
+  cost is attributable. 100k-scale pulls complete; use Export CSV /
+  Summary for the full set (grid still caps at newest 50k for UI).
+
 ## [1.1.15] - 2026-05-19
 
 ### Added

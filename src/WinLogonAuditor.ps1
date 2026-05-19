@@ -194,11 +194,19 @@ function Get-DecodedLogonType {
 function ConvertTo-AuditRow {
     param([System.Diagnostics.Eventing.Reader.EventLogRecord]$Evt)
 
+    # Fast EventData extract. Building an [xml] DOM per event is the
+    # dominant cost at 100k events x DC (it made big pulls hang); a single
+    # regex over the ToXml() string is several times faster and produces
+    # the same hashtable. XML entities are decoded back.
     $data = @{}
     try {
-        [xml]$x = $Evt.ToXml()
-        foreach ($d in $x.Event.EventData.Data) {
-            if ($d.Name) { $data[$d.Name] = [string]$d.'#text' }
+        $xmlStr = $Evt.ToXml()
+        foreach ($m in [regex]::Matches($xmlStr, "<Data Name='([^']*)'>(.*?)</Data>", [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+            $val = $m.Groups[2].Value
+            if ($val.IndexOf('&') -ge 0) {
+                $val = $val.Replace('&lt;','<').Replace('&gt;','>').Replace('&quot;','"').Replace('&apos;',"'").Replace('&amp;','&')
+            }
+            $data[$m.Groups[1].Value] = $val
         }
     } catch {}
 
@@ -427,7 +435,12 @@ function Invoke-AuditQuery {
                 $out.Add($row)
             }
         }
-        ,$out.ToArray()
+        # Return ONE CSV string, not 100k object graphs. PowerShell
+        # Remoting serializes a single large string far faster/smaller
+        # than tens of thousands of PSObjects (that was the big-pull
+        # bottleneck). The client re-parses with ConvertFrom-Csv.
+        if ($out.Count -eq 0) { return '' }
+        ($out | ConvertTo-Csv -NoTypeInformation) -join "`n"
     }
 
     $ft = @{
@@ -458,8 +471,18 @@ function Invoke-AuditQuery {
         }
     }
     $swf.Stop()
-    foreach ($r in @($res)) { if ($r) { $rows.Add($r) } }
-    & $qlog "$($rows.Count) rows in $([int]$swf.Elapsed.TotalSeconds)s ($(if($isLocal){'local'}else{'remote/WinRM'}))"
+    $csv = if ($res -is [array]) { ($res -join "`n") } else { "$res" }
+    $fetchSecs = [int]$swf.Elapsed.TotalSeconds
+    $swp = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($csv -and $csv.Trim()) {
+        foreach ($r in @($csv | ConvertFrom-Csv)) {
+            try { $r.EventId = [int]$r.EventId } catch {}
+            try { $r.Time = [datetime]$r.TimeStr } catch { $r.Time = Get-Date }
+            $rows.Add($r)
+        }
+    }
+    $swp.Stop()
+    & $qlog "$($rows.Count) rows; fetch+convert $fetchSecs s on $(if($isLocal){'local'}else{$ComputerName}), reparse $([int]$swp.Elapsed.TotalSeconds)s"
     return ($rows | Sort-Object Time -Descending)
 }
 
@@ -543,7 +566,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.15'
+$Script:AppVersion = '1.1.16'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
