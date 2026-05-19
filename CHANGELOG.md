@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-19
+
 ### Added
 - Configurable max-events cap (default 100k, per DC) replacing the old
   effective ~2k truncation; "Max events/DC" toolbar field + config key;
@@ -128,7 +130,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.6...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.6...v1.1.0
 [1.0.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.3...v1.0.4
