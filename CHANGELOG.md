@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.11] - 2026-05-19
+
 ### Fixed
 - Data is retrieved (29k+ events over WinRM, fast) but the run hung at
   "Sorting & summarising": the post-processing reverse-DNS step did a
@@ -292,7 +294,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.10...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.11...HEAD
+[1.1.11]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.10...v1.1.11
 [1.1.10]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.9...v1.1.10
 [1.1.9]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.8...v1.1.9
 [1.1.8]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.7...v1.1.8
