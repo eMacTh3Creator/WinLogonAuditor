@@ -8,6 +8,21 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [1.1.4] - 2026-05-19
 
+## [1.1.4] - 2026-05-19
+
+### Added
+- Partial-failure warning banner: when some DCs return but others
+  fail or time out, an amber banner now lists them ("Incomplete: 1
+  DC(s) failed/skipped ... eDC2: RPC server unavailable") so an
+  incomplete lockout sweep is never mistaken for a clean one.
+
+### Changed
+- Run logs now live in their own folder: %TEMP%\WinLogonAuditor\logs\
+  (still the 10 most recent). Old logs written directly in %TEMP% are
+  cleaned up automatically on first run.
+
+## [1.1.4] - 2026-05-19
+
 ### Added
 - Partial-failure warning banner: when some DCs return but others
   fail or time out, an amber banner now lists them ("Incomplete: 1
@@ -192,7 +207,10 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...HEAD
+[1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.4
+[1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.4
+[1.1.4]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.0...v1.1.1
