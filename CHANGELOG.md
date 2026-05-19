@@ -6,6 +6,16 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- PSRemoting now works AND returns data. v1.1.9 connected to every DC
+  fast (no more hang) but returned 0 rows: Invoke-Command -ArgumentList
+  unwraps nested/single-element arrays, so the engine's $logs collapsed
+  and Get-WinEvent matched nothing (silent "no events"). The event-ID
+  lists are now passed as flat top-level arguments and the log list +
+  maps are rebuilt inside the engine, with explicit int coercion
+  (remoting also turns hashtable keys into strings, which broke the
+  category map). Behaves identically local and remote.
+
 ## [1.1.9] - 2026-05-19
 
 ### Fixed

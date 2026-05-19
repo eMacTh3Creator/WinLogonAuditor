@@ -379,20 +379,34 @@ function Invoke-AuditQuery {
     # returning only the flattened rows is how scalable tools do it.
     # Query by LogName+Id only (no server-side time predicate -> fast tail
     # read), then bound the window client-side, newest-first early-out.
+    # NOTE: PowerShell Remoting -ArgumentList unwraps nested/single-element
+    # arrays. Pass the ID lists as their own flat args and rebuild the log
+    # list + maps INSIDE the engine (with explicit int coercion - remoting
+    # turns hashtable keys into strings) so it works identically local and
+    # remote.
     $engine = {
-        param($Logs,$MaxEvents,$StartTicks,$EndTicks,$UserFilter,$FT,$Maps)
+        param($SecIds,$SysIds,$MaxEvents,$StartTicks,$EndTicks,$UserFilter,$FT,$Maps)
         $ErrorActionPreference = 'Stop'
-        $Script:LogonTypeMap=$Maps.LogonTypeMap; $Script:StatusMap=$Maps.StatusMap
-        $Script:KerbMap=$Maps.KerbMap;          $Script:CategoryMap=$Maps.CategoryMap
-        $Script:SecurityIds=$Maps.SecurityIds;  $Script:SystemIds=$Maps.SystemIds
+        $SecIds = @($SecIds | ForEach-Object { [int]$_ })
+        $SysIds = @($SysIds | ForEach-Object { [int]$_ })
+        $Script:LogonTypeMap = $Maps.LogonTypeMap
+        $Script:StatusMap    = $Maps.StatusMap
+        $Script:KerbMap      = $Maps.KerbMap
+        $cm = @{}; foreach ($k in $Maps.CategoryMap.Keys) { $cm[[int]$k] = $Maps.CategoryMap[$k] }
+        $Script:CategoryMap  = $cm
+        $Script:SecurityIds  = @($Maps.SecurityIds | ForEach-Object { [int]$_ })
+        $Script:SystemIds    = @($Maps.SystemIds   | ForEach-Object { [int]$_ })
         Set-Item function:Get-DecodedStatus    ([scriptblock]::Create($FT.St))
         Set-Item function:Get-DecodedKerb      ([scriptblock]::Create($FT.Kb))
         Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($FT.Lt))
         Set-Item function:ConvertTo-AuditRow   ([scriptblock]::Create($FT.Cv))
         $start = [datetime]::new([long]$StartTicks)
         $end   = [datetime]::new([long]$EndTicks)
+        $logs = @()
+        if ($SecIds.Count) { $logs += ,@('Security', $SecIds) }
+        if ($SysIds.Count) { $logs += ,@('System',   $SysIds) }
         $out = New-Object System.Collections.Generic.List[object]
-        foreach ($lg in $Logs) {
+        foreach ($lg in $logs) {
             $remaining = $MaxEvents - $out.Count
             if ($remaining -le 0) { break }
             try {
@@ -425,7 +439,7 @@ function Invoke-AuditQuery {
         LogonTypeMap=$Script:LogonTypeMap; StatusMap=$Script:StatusMap; KerbMap=$Script:KerbMap
         CategoryMap=$Script:CategoryMap; SecurityIds=$Script:SecurityIds; SystemIds=$Script:SystemIds
     }
-    $argList = @($logs, $MaxEvents, $Start.Ticks, $End.Ticks, $UserFilter, $ft, $mapsArg)
+    $argList = @($secIds, $sysIds, $MaxEvents, $Start.Ticks, $End.Ticks, $UserFilter, $ft, $mapsArg)
     $swf = [System.Diagnostics.Stopwatch]::StartNew()
     if ($isLocal) {
         & $qlog "local: querying [$(@($logs | ForEach-Object { $_[0] }) -join ',')] cap $MaxEvents..."
@@ -528,7 +542,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.9'
+$Script:AppVersion = '1.1.10'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
