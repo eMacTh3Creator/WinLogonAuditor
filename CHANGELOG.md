@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-05-19
+
 ### Added
 - Per-run logging to %TEMP%\WinLogonAuditor_yyyyMMdd_HHmmss.log (the 10
   most recent runs are kept). Captures startup/env, query parameters,
@@ -155,7 +157,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.6...v1.1.0
 [1.0.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.5...v1.0.6
