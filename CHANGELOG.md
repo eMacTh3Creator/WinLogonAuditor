@@ -6,6 +6,14 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- "Query failed: Argument types do not match" when running a multi-DC
+  query in the packaged exe. The per-DC cap was signalled via a [ref]
+  parameter marshalled into the child query runspaces, which is
+  unreliable under the PS2EXE runtime; the cap is now derived from the
+  returned row count instead (no [ref]). Worker/UI errors now also
+  include the failing script line to make any future issue diagnosable.
+
 ## [1.1.0] - 2026-05-19
 
 ### Added

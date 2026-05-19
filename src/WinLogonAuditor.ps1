@@ -319,8 +319,7 @@ function Invoke-AuditQuery {
         [datetime]$End,
         [string]$UserFilter = '*',
         [int]$MaxEvents = 100000,
-        [pscredential]$Credential,
-        [ref]$Capped
+        [pscredential]$Credential
     )
     if ($MaxEvents -le 0) { $MaxEvents = 100000 }
 
@@ -350,7 +349,7 @@ function Invoke-AuditQuery {
     :outer foreach ($lg in $logs) {
         foreach ($ch in $chunks) {
             $remaining = $MaxEvents - $rows.Count
-            if ($remaining -le 0) { if ($Capped) { $Capped.Value = $true }; break outer }
+            if ($remaining -le 0) { break outer }
             $filter = @{ LogName=$lg[0]; Id=$lg[1]; StartTime=$ch[0]; EndTime=$ch[1] }
             $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
             if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
@@ -372,7 +371,7 @@ function Invoke-AuditQuery {
                 }
                 $rows.Add($row)
             }
-            if ($rows.Count -ge $MaxEvents) { if ($Capped) { $Capped.Value = $true }; break outer }
+            if ($rows.Count -ge $MaxEvents) { break outer }
         }
     }
     return ($rows | Sort-Object Time -Descending)
@@ -923,7 +922,8 @@ function Invoke-Safe {
         Set-Busy $false
         try { $Script:Sync.Running = $false } catch {}
         try { $Script:ctl.BtnQuery.IsEnabled = $true } catch {}
-        $m = "{0} failed: {1}" -f $What, $_.Exception.Message
+        $ln = try { $_.InvocationInfo.ScriptLineNumber } catch { '?' }
+        $m = "{0} failed: {1}  [line {2}]" -f $What, $_.Exception.Message, $ln
         try { $Script:ctl.TxtStatus.Text = $m } catch {}
         try { [System.Windows.MessageBox]::Show($m,'WinLogonAuditor','OK','Warning') | Out-Null } catch {}
     }
@@ -1119,12 +1119,12 @@ function Start-Audit {
                     Set-Item function:Get-DecodedStatus    ([scriptblock]::Create($p[2]))
                     Set-Item function:Get-DecodedKerb      ([scriptblock]::Create($p[3]))
                     Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($p[4]))
-                    $cap = $false
                     $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
                             -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
-                            -MaxEvents $qa.MaxEvents -Credential $qa.Credential -Capped ([ref]$cap)
-                    $slot.Rows = @($r); $slot.Ok = $true; $slot.Capped = $cap
-                } catch { $slot.Err = $_.Exception.Message }
+                            -MaxEvents $qa.MaxEvents -Credential $qa.Credential
+                    $slot.Rows = @($r); $slot.Ok = $true
+                    $slot.Capped = (@($r).Count -ge [int]$qa.MaxEvents)
+                } catch { $slot.Err = "$($_.Exception.Message)  @ $($_.InvocationInfo.ScriptLineNumber)" }
                 finally { $slot.Done = $true }
             }
 
@@ -1286,7 +1286,9 @@ function Start-Audit {
                 ByUser = @($byUser | Sort-Object Last -Descending)
             }
         } catch {
-            $sync.Error = $_.Exception.Message
+            $eln = $_.InvocationInfo.ScriptLineNumber
+            $esrc = ('' + $_.InvocationInfo.Line).Trim()
+            $sync.Error = "$($_.Exception.Message)  [line $eln : $esrc]"
         } finally {
             $sync.Done = $true
         }
