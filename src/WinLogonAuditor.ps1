@@ -359,10 +359,6 @@ function Invoke-AuditQuery {
     $rows   = New-Object System.Collections.Generic.List[object]
     $isLocal = $ComputerName -in @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')
 
-    # One server-side filtered query per log. Get-WinEvent's FilterHashtable
-    # does the StartTime/EndTime/Id filtering on the DC and -MaxEvents bounds
-    # the result, so a single call is far faster than many time slices
-    # (per-call RPC overhead made >24h windows time out).
     $logs = @()
     if ($secIds.Count) { $logs += ,@('Security', $secIds) }
     if ($sysIds.Count) { $logs += ,@('System',   $sysIds) }
@@ -373,38 +369,59 @@ function Invoke-AuditQuery {
             try { [System.IO.File]::AppendAllText($Script:QLog, ("[{0}] [INFO] [dc:$($Script:QTag)] {1}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $m)) } catch {}
         }
     }
+    # Query newest-first in time slices and STOP as soon as the cap is
+    # reached. A single huge-window structured query hangs server-side on
+    # a busy DC's enormous Security log; tight slices return quickly and on
+    # a noisy DC the newest slice alone fills the cap (one fast call).
+    $totalHrs = ($End - $Start).TotalHours
+    $sliceHrs = if ($totalHrs -le 24) { 2 } elseif ($totalHrs -le 72) { 6 } else { 12 }
+
     foreach ($lg in $logs) {
         $remaining = $MaxEvents - $rows.Count
         if ($remaining -le 0) { break }
-        $filter = @{ LogName=$lg[0]; Id=$lg[1]; StartTime=$Start; EndTime=$End }
-        $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
-        if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
-        if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
-        & $qlog "$($lg[0]): fetching (cap $remaining, $($Start.ToString('MM-dd HH:mm'))..$($End.ToString('MM-dd HH:mm')))..."
-        $swf = [System.Diagnostics.Stopwatch]::StartNew()
-        try {
-            $raw = Get-WinEvent @params
-        } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
-            throw "Cannot read '$($lg[0])' on '$ComputerName': $($_.Exception.Message). " +
-                  "Ensure the account is in 'Event Log Readers' / local admin and that " +
-                  "Remote Event Log Management is allowed through the firewall."
-        } catch {
-            if ("$($_.Exception.Message)" -match 'No events were found') { & $qlog "$($lg[0]): 0 events"; continue }
-            throw $_
-        }
-        $swf.Stop()
-        $rawArr = @($raw)
-        & $qlog "$($lg[0]): fetched $($rawArr.Count) raw in $([int]$swf.Elapsed.TotalSeconds)s; converting..."
-        $swp = [System.Diagnostics.Stopwatch]::StartNew()
-        foreach ($e in $rawArr) {
-            $row = ConvertTo-AuditRow -Evt $e
-            if ($UserFilter -and $UserFilter -ne '*') {
-                if ($row.User -notlike $UserFilter) { continue }
+        $sliceEnd = $End
+        $sliceNo  = 0
+        :slices while ($sliceEnd -gt $Start) {
+            $remaining = $MaxEvents - $rows.Count
+            if ($remaining -le 0) { & $qlog "$($lg[0]): cap reached, stopping early"; break slices }
+            $sliceStart = $sliceEnd.AddHours(-$sliceHrs)
+            if ($sliceStart -lt $Start) { $sliceStart = $Start }
+            $sliceNo++
+            $filter = @{ LogName=$lg[0]; Id=$lg[1]; StartTime=$sliceStart; EndTime=$sliceEnd }
+            $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
+            if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
+            if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
+            & $qlog "$($lg[0]) slice#${sliceNo}: fetching (cap $remaining, $($sliceStart.ToString('MM-dd HH:mm'))..$($sliceEnd.ToString('MM-dd HH:mm')))..."
+            $swf = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                $raw = Get-WinEvent @params
+            } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
+                throw "Cannot read '$($lg[0])' on '$ComputerName': $($_.Exception.Message). " +
+                      "Ensure the account is in 'Event Log Readers' / local admin and that " +
+                      "Remote Event Log Management is allowed through the firewall."
+            } catch {
+                if ("$($_.Exception.Message)" -match 'No events were found') {
+                    $swf.Stop()
+                    & $qlog "$($lg[0]) slice#${sliceNo}: 0 events in $([int]$swf.Elapsed.TotalSeconds)s"
+                    $sliceEnd = $sliceStart
+                    continue slices
+                }
+                throw $_
             }
-            $rows.Add($row)
+            $swf.Stop()
+            $rawArr = @($raw)
+            $swp = [System.Diagnostics.Stopwatch]::StartNew()
+            foreach ($e in $rawArr) {
+                $row = ConvertTo-AuditRow -Evt $e
+                if ($UserFilter -and $UserFilter -ne '*') {
+                    if ($row.User -notlike $UserFilter) { continue }
+                }
+                $rows.Add($row)
+            }
+            $swp.Stop()
+            & $qlog "$($lg[0]) slice#${sliceNo}: $($rawArr.Count) raw in $([int]$swf.Elapsed.TotalSeconds)s -> $($rows.Count) kept (+$([int]$swp.Elapsed.TotalSeconds)s)"
+            $sliceEnd = $sliceStart
         }
-        $swp.Stop()
-        & $qlog "$($lg[0]): converted -> $($rows.Count) kept in $([int]$swp.Elapsed.TotalSeconds)s"
     }
     return ($rows | Sort-Object Time -Descending)
 }
@@ -489,7 +506,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.6'
+$Script:AppVersion = '1.1.7'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))

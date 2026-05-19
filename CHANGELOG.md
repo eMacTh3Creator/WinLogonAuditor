@@ -6,6 +6,18 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Multi-DC queries still timing out even at cap 5000 / 8-24h: the log
+  proved Get-WinEvent never returned (reached "fetching", never
+  "fetched"). A single structured query over a 24h window hangs
+  server-side on a DC whose Security log is enormous (active logon
+  storm), regardless of -MaxEvents. Reinstated newest-first time
+  slicing (2h slices <=24h, 6h <=3d, 12h beyond) that STOPS as soon as
+  the cap is reached - on a noisy DC the newest slice alone fills the
+  cap in one fast call; on quiet DCs a few cheap slices cover the
+  window. Each slice is logged ("slice#N: M raw in Xs -> kept").
+  (This restores, correctly bounded, the slicing that v1.1.3 removed.)
+
 ## [1.1.6] - 2026-05-19
 
 ### Fixed
