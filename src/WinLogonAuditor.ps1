@@ -542,7 +542,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.11'
+$Script:AppVersion = '1.1.12'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -1526,10 +1526,12 @@ function Update-Views {
     Apply-Filter
     $v = $Script:Sync.Views
     if ($v) {
-        $Script:ctl.GridSumCat.ItemsSource  = $v.Cat
-        $Script:ctl.GridSumUser.ItemsSource = $v.User
-        $Script:ctl.GridSumSrc.ItemsSource  = $v.Src
-        $Script:ctl.GridOut.ItemsSource     = $v.ByUser
+        # @() guards against PowerShell unwrapping a single-row summary to
+        # a lone object (WPF ItemsSource requires IEnumerable).
+        $Script:ctl.GridSumCat.ItemsSource  = @($v.Cat)
+        $Script:ctl.GridSumUser.ItemsSource = @($v.User)
+        $Script:ctl.GridSumSrc.ItemsSource  = @($v.Src)
+        $Script:ctl.GridOut.ItemsSource     = @($v.ByUser)
     }
     # Warning banner: cap reached and/or excludes active
     $w = @()

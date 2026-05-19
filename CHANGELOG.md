@@ -6,6 +6,13 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- End-to-end now works (WinRM transport pulls real events fast). Final
+  bug: when a summary tab had exactly one row (e.g. a single user when
+  filtered), PowerShell unwrapped the one-element array and WPF threw
+  "Cannot convert ... PSCustomObject to IEnumerable" on ItemsSource.
+  The four summary/analyzer grid bindings are now wrapped in @().
+
 ## [1.1.11] - 2026-05-19
 
 ### Fixed
