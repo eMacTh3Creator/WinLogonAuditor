@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.8] - 2026-05-19
+
 ### Fixed
 - THE timeout root cause. Comparing against v1.0.6 (the last build that
   worked - at a 1h window) showed every version put StartTime/EndTime
@@ -250,7 +252,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.7...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.8...HEAD
+[1.1.8]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.7...v1.1.8
 [1.1.7]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.6...v1.1.7
 [1.1.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.4...v1.1.5
