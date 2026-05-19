@@ -6,6 +6,20 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- THE timeout root cause. Comparing against v1.0.6 (the last build that
+  worked - at a 1h window) showed every version put StartTime/EndTime
+  in the Get-WinEvent FilterHashtable. On this environment's giant,
+  storm-filled DC Security log a *time-bounded* structured query makes
+  the event-log service scan the channel and hang server-side (every
+  "fetching" with no "fetched"); it only "worked" at 1h because the
+  scan was tiny. Now the query is by LogName+Id only, newest-first,
+  -MaxEvents-capped (a fast tail read the service streams from the end,
+  no scan), and the time window is applied client-side with an early
+  break once events predate the window. Slicing removed (it still
+  carried the fatal time predicate). This is the pattern fast lockout
+  tools use to stay responsive on huge logs.
+
 ## [1.1.7] - 2026-05-19
 
 ### Fixed
