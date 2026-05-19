@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.9] - 2026-05-19
+
 ### Fixed
 - THE remote timeout, definitively. Diffing v1.0.6 (worked, at 1h)
   proved the per-DC mechanism was always identical; eight query-shape
@@ -266,7 +268,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.8...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.9...HEAD
+[1.1.9]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.8...v1.1.9
 [1.1.8]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.7...v1.1.8
 [1.1.7]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.6...v1.1.7
 [1.1.6]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.5...v1.1.6
