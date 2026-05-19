@@ -41,6 +41,10 @@ if (-not (Get-Module -ListAvailable -Name ps2exe)) {
 }
 Import-Module ps2exe -Force
 
+$icon = Join-Path $repo 'assets\winlogonauditor.ico'
+$iconArg = @{}
+if (Test-Path $icon) { $iconArg['iconFile'] = $icon }
+
 Write-Host "Packaging $src -> $out (v$Version)" -ForegroundColor Cyan
 Invoke-PS2EXE `
     -InputFile  $src `
@@ -53,7 +57,7 @@ Invoke-PS2EXE `
     -company     'WinLogonAuditor (MIT)' `
     -copyright   "(c) $(Get-Date -Format yyyy) WinLogonAuditor contributors" `
     -version     $Version `
-    -requireAdmin
+    -requireAdmin @iconArg
 
 if (-not (Test-Path $out)) { throw 'Build failed: exe was not produced.' }
 Copy-Item $out $alias -Force

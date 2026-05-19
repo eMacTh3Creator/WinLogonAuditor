@@ -6,6 +6,9 @@ WinLogonAuditor_*.csv
 dist/
 *.exe
 
+# Icon build intermediate (PNG/ICO are committed; base64 helper is not)
+assets/icon.b64
+
 # Editor / OS noise
 .vs/
 *.user

@@ -1,3 +1,4 @@
+<p align="center"><img src="assets/winlogonauditor.png" alt="WinLogonAuditor" width="120" height="120"></p>
 <h1 align="center">WinLogonAuditor</h1>
 
 <p align="center">

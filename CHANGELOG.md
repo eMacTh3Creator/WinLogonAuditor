@@ -6,6 +6,37 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Configurable max-events cap (default 100k, per DC) replacing the old
+  effective ~2k truncation; "Max events/DC" toolbar field + config key;
+  amber warning banner and "CAP HIT" status when the cap is reached.
+- Exclude lists (Users / Sources / DCs) with wildcards, persisted to
+  config.json; "Excludes..." editor and right-click "Mute this user /
+  source host / source IP" on any grid row; "N excluded" in the status
+  bar; excluded rows dropped from grid, summary and export.
+- Full lockout-source correlation in the Lockout Investigator: live
+  query of 4740 + preceding 4771/4625/4776 over a configurable Lookback
+  (default 60 min) across the selected target/all-DCs, source IPs
+  resolved to DNS hostnames, ranked offending-source grid + verdict.
+- Watch mode: continuous polling for new lockouts of a watched-user
+  list with tray toast notifications and an append-only
+  %APPDATA%\WinLogonAuditor\LockoutHunt_yyyyMMdd.csv history.
+- Chunked retrieval for windows > 24h (hourly slices, newest first).
+- Application icon (title bar, taskbar, exe) and GitHub/site branding.
+- New CLI flags: -MaxEvents, -ExcludeUsers, -ExcludeSources,
+  -WatchMode, -WatchUsers.
+
+### Changed
+- CSV export now uses an event-aware normalized schema; SourceIP and
+  FailureCode/FailureReason are populated for 4771/4625 (previously
+  blank). Export filename gets a _filtered suffix when excludes apply.
+- ::ffff: IPv6-mapped prefix stripped from all IP fields.
+- config.json schema extended additively (old files keep working).
+
+### Fixed
+- Time-range presets now retrieve the full window up to the cap
+  instead of only the most recent ~2,000 events.
+
 ## [1.0.6] - 2026-05-18
 
 ### Added

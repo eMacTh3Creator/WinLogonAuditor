@@ -42,6 +42,11 @@ param(
     [string]$User = '*',
     [int]$Hours = 24,
     [string]$OutFile = "WinLogonAuditor_$(Get-Date -Format yyyyMMdd_HHmmss).csv",
+    [int]$MaxEvents = 0,
+    [string[]]$ExcludeUsers = @(),
+    [string[]]$ExcludeSources = @(),
+    [switch]$WatchMode,
+    [string[]]$WatchUsers = @(),
     [switch]$NoShow
 )
 
@@ -214,7 +219,7 @@ function ConvertTo-AuditRow {
     $srcHost = $data['WorkstationName']
     if (-not $srcHost) { $srcHost = $data['Workstation'] }
     if ($id -eq 4740) { $srcHost = $data['CallerComputerName'] }
-    $srcIp = $data['IpAddress']
+    $srcIp = "$($data['IpAddress'])" -replace '^::ffff:',''
     if ($srcIp -in @('-','::1','127.0.0.1')) { $srcIp = "$srcIp (local)" }
 
     # Extra auth context (key for "what is locking the account")
@@ -244,7 +249,10 @@ function ConvertTo-AuditRow {
             if ($proc -and $proc -ne '-') { $bits += "proc $proc" }
             $reason = ($bits -join '  |  ')
         }
-        4771 { $reason = Get-DecodedKerb $data['Failure'] ; if (-not $reason) { $reason = Get-DecodedKerb $data['FailureCode'] } }
+        4771 {
+            $kc = $data['Status']; if (-not $kc) { $kc = $data['Failure'] }; if (-not $kc) { $kc = $data['FailureCode'] }
+            $reason = Get-DecodedKerb $kc
+        }
         4768 { if ($data['Status'] -and $data['Status'] -ne '0x0') { $reason = Get-DecodedKerb $data['Status'] } }
         4776 {
             $w = $data['Workstation']
@@ -264,6 +272,20 @@ function ConvertTo-AuditRow {
 
     $logonType = Get-DecodedLogonType $data['LogonType']
 
+    # Normalized failure code/reason per event id (for the CSV export)
+    $failCode = ''; $failReason = ''
+    switch ($id) {
+        4625 {
+            $failCode = if ($data['SubStatus'] -and $data['SubStatus'] -ne '0x0') { $data['SubStatus'] } else { $data['Status'] }
+            $failReason = Get-DecodedStatus $failCode
+        }
+        4771 { $failCode = $data['Status']; if (-not $failCode) { $failCode = $data['Failure'] }; $failReason = Get-DecodedKerb $failCode }
+        4768 { $failCode = $data['Status']; $failReason = Get-DecodedKerb $failCode }
+        4776 { $failCode = $data['Status']; $failReason = Get-DecodedStatus $failCode }
+    }
+    $callerComp = $data['CallerComputerName']
+    if ($id -eq 4740 -and -not $callerComp) { $callerComp = $data['TargetDomainName'] }
+
     [pscustomobject]@{
         Time        = $Evt.TimeCreated
         TimeStr     = $Evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
@@ -276,11 +298,13 @@ function ConvertTo-AuditRow {
         SourceIP    = $srcIp
         LogonType   = $logonType
         Reason      = $reason
+        FailureCode = "$failCode"
+        FailureReason = "$failReason"
         LoggedOn    = $Evt.MachineName
         Process     = $proc
         AuthPkg     = $authPkg
         LogonProc   = $logonProc
-        CallerComp  = $data['CallerComputerName']
+        CallerComp  = $callerComp
         Message     = ($Evt.FormatDescription())
     }
 }
@@ -294,39 +318,61 @@ function Invoke-AuditQuery {
         [datetime]$Start,
         [datetime]$End,
         [string]$UserFilter = '*',
-        [int]$MaxEvents = 5000,
-        [pscredential]$Credential
+        [int]$MaxEvents = 100000,
+        [pscredential]$Credential,
+        [ref]$Capped
     )
+    if ($MaxEvents -le 0) { $MaxEvents = 100000 }
 
     $secIds = @($EventIds | Where-Object { $_ -in $Script:SecurityIds })
     $sysIds = @($EventIds | Where-Object { $_ -in $Script:SystemIds  })
     $rows   = New-Object System.Collections.Generic.List[object]
     $isLocal = $ComputerName -in @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')
 
-    $queries = @()
-    if ($secIds.Count) { $queries += ,@{ LogName='Security'; Id=$secIds; StartTime=$Start; EndTime=$End } }
-    if ($sysIds.Count) { $queries += ,@{ LogName='System';   Id=$sysIds; StartTime=$Start; EndTime=$End } }
-
-    foreach ($filter in $queries) {
-        $params = @{ FilterHashtable = $filter; MaxEvents = $MaxEvents; ErrorAction = 'Stop' }
-        if (-not $isLocal)   { $params['ComputerName'] = $ComputerName }
-        if ($Credential -and -not $isLocal) { $params['Credential'] = $Credential }
-        try {
-            $raw = Get-WinEvent @params
-        } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
-            throw "Cannot read '$($filter.LogName)' on '$ComputerName': $($_.Exception.Message). " +
-                  "Ensure the account is in 'Event Log Readers' / local admin and that " +
-                  "Remote Event Log Management is allowed through the firewall."
-        } catch {
-            if ("$($_.Exception.Message)" -match 'No events were found') { continue }
-            throw $_
+    # Chunk long windows (>24h) into <=1h slices, newest first, so one giant
+    # blocking RPC is avoided and the most recent events come back first.
+    $chunks = @()
+    if (($End - $Start).TotalHours -gt 24) {
+        $cEnd = $End
+        while ($cEnd -gt $Start) {
+            $cStart = $cEnd.AddHours(-1); if ($cStart -lt $Start) { $cStart = $Start }
+            $chunks += ,@($cStart, $cEnd)
+            $cEnd = $cStart
         }
-        foreach ($e in $raw) {
-            $row = ConvertTo-AuditRow -Evt $e
-            if ($UserFilter -and $UserFilter -ne '*') {
-                if ($row.User -notlike $UserFilter) { continue }
+    } else {
+        $chunks = ,@($Start, $End)
+    }
+
+    $logs = @()
+    if ($secIds.Count) { $logs += ,@('Security', $secIds) }
+    if ($sysIds.Count) { $logs += ,@('System',   $sysIds) }
+
+    :outer foreach ($lg in $logs) {
+        foreach ($ch in $chunks) {
+            $remaining = $MaxEvents - $rows.Count
+            if ($remaining -le 0) { if ($Capped) { $Capped.Value = $true }; break outer }
+            $filter = @{ LogName=$lg[0]; Id=$lg[1]; StartTime=$ch[0]; EndTime=$ch[1] }
+            $params = @{ FilterHashtable=$filter; MaxEvents=$remaining; ErrorAction='Stop' }
+            if (-not $isLocal)                  { $params['ComputerName'] = $ComputerName }
+            if ($Credential -and -not $isLocal) { $params['Credential']  = $Credential }
+            try {
+                $raw = Get-WinEvent @params
+            } catch [System.Diagnostics.Eventing.Reader.EventLogException] {
+                throw "Cannot read '$($lg[0])' on '$ComputerName': $($_.Exception.Message). " +
+                      "Ensure the account is in 'Event Log Readers' / local admin and that " +
+                      "Remote Event Log Management is allowed through the firewall."
+            } catch {
+                if ("$($_.Exception.Message)" -match 'No events were found') { continue }
+                throw $_
             }
-            $rows.Add($row)
+            foreach ($e in $raw) {
+                $row = ConvertTo-AuditRow -Evt $e
+                if ($UserFilter -and $UserFilter -ne '*') {
+                    if ($row.User -notlike $UserFilter) { continue }
+                }
+                $rows.Add($row)
+            }
+            if ($rows.Count -ge $MaxEvents) { if ($Capped) { $Capped.Value = $true }; break outer }
         }
     }
     return ($rows | Sort-Object Time -Descending)
@@ -339,14 +385,36 @@ function Invoke-AuditQuery {
 $Script:ConfigDir  = Join-Path $env:APPDATA 'WinLogonAuditor'
 $Script:ConfigPath = Join-Path $Script:ConfigDir 'config.json'
 
+function New-ExcludesObject {
+    param($Src)
+    $u = @(); $s = @(); $d = @()
+    if ($Src) {
+        if ($Src.Users)   { $u = @($Src.Users) }
+        if ($Src.Sources) { $s = @($Src.Sources) }
+        if ($Src.DCs)     { $d = @($Src.DCs) }
+    }
+    [pscustomobject]@{ Users = $u; Sources = $s; DCs = $d }
+}
+
 function Get-AuditConfig {
-    $def = [pscustomobject]@{ Servers = @(); LastTarget = ''; QueryAllDcs = $true }
+    # Additive defaults - old config.json files keep working.
+    $def = [pscustomobject]@{
+        Servers = @(); LastTarget = ''; QueryAllDcs = $true
+        MaxEventsPerCategory = 100000; LookbackMinutes = 60
+        WatchInterval = 30; WatchUsers = @()
+        Excludes = (New-ExcludesObject $null)
+    }
     try {
         if (Test-Path $Script:ConfigPath) {
             $c = Get-Content $Script:ConfigPath -Raw | ConvertFrom-Json
-            if (-not $c.Servers)    { $c | Add-Member Servers @() -Force }
-            if ($null -eq $c.LastTarget)  { $c | Add-Member LastTarget '' -Force }
-            if ($null -eq $c.QueryAllDcs) { $c | Add-Member QueryAllDcs $false -Force }
+            if (-not $c.Servers)                 { $c | Add-Member Servers @() -Force }
+            if ($null -eq $c.LastTarget)         { $c | Add-Member LastTarget '' -Force }
+            if ($null -eq $c.QueryAllDcs)        { $c | Add-Member QueryAllDcs $false -Force }
+            if (-not $c.MaxEventsPerCategory)    { $c | Add-Member MaxEventsPerCategory 100000 -Force }
+            if (-not $c.LookbackMinutes)         { $c | Add-Member LookbackMinutes 60 -Force }
+            if (-not $c.WatchInterval)           { $c | Add-Member WatchInterval 30 -Force }
+            if ($null -eq $c.WatchUsers)         { $c | Add-Member WatchUsers @() -Force }
+            $c | Add-Member Excludes (New-ExcludesObject $c.Excludes) -Force
             return $c
         }
     } catch {}
@@ -357,8 +425,30 @@ function Save-AuditConfig {
     param($Config)
     try {
         if (-not (Test-Path $Script:ConfigDir)) { New-Item -ItemType Directory -Path $Script:ConfigDir -Force | Out-Null }
-        $Config | ConvertTo-Json -Depth 4 | Set-Content -Path $Script:ConfigPath -Encoding UTF8
+        $Config | ConvertTo-Json -Depth 6 | Set-Content -Path $Script:ConfigPath -Encoding UTF8
     } catch {}
+}
+
+# Wildcard-aware match of a value against a list of patterns (case-insensitive).
+function Test-MatchAny {
+    param([string]$Value, $Patterns)
+    if (-not $Value -or -not $Patterns) { return $false }
+    foreach ($p in @($Patterns)) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        if ($Value -like $p) { return $true }
+    }
+    return $false
+}
+
+# True when a row should be hidden by the exclude lists.
+function Test-RowExcluded {
+    param($Row, $Excludes)
+    if (-not $Excludes) { return $false }
+    if (Test-MatchAny $Row.User       $Excludes.Users)   { return $true }
+    if (Test-MatchAny $Row.SourceHost $Excludes.Sources) { return $true }
+    if (Test-MatchAny $Row.SourceIP   $Excludes.Sources) { return $true }
+    if (Test-MatchAny $Row.LoggedOn   $Excludes.DCs)     { return $true }
+    return $false
 }
 
 # Enumerate domain controllers for the current (or a specified) domain.
@@ -396,17 +486,127 @@ function Get-DomainControllerList {
 
 #endregion
 
+#region ------------------------------------------------------- Shared helpers
+
+# Event-aware normalized CSV schema (Feature 5). One stable column set;
+# each column is filled from the right field for that event id, IPv6
+# ::ffff: prefix already stripped upstream, empty (not null) when n/a.
+function ConvertTo-ExportRow {
+    param($Row)
+    [pscustomobject][ordered]@{
+        TimeStr       = $Row.TimeStr
+        EventId       = $Row.EventId
+        Result        = $Row.Result
+        Category      = $Row.Category
+        User          = $Row.User
+        Domain        = $Row.Domain
+        SourceHost    = $Row.SourceHost
+        SourceIP      = ($Row.SourceIP -replace '^::ffff:','')
+        CallerComputer= $Row.CallerComp
+        LogonType     = $Row.LogonType
+        FailureCode   = $Row.FailureCode
+        FailureReason = $Row.FailureReason
+        Reason        = $Row.Reason
+        LoggedOn      = $Row.LoggedOn
+    }
+}
+
+function Export-AuditCsv {
+    param($Rows, [string]$Path)
+    @($Rows | ForEach-Object { ConvertTo-ExportRow $_ }) |
+        Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8
+}
+
+# Feature 3/4 core: for a user, pull lockouts + the preceding NTLM/Kerberos
+# failure trail across the given targets, resolve source IPs (cached), and
+# return flat trail rows. $DnsCache is a hashtable reused across calls.
+function Invoke-LockoutTrace {
+    param(
+        [string[]]$Targets,
+        [string]$User,
+        [int]$LookbackMinutes = 60,
+        [pscredential]$Credential,
+        [hashtable]$DnsCache = @{}
+    )
+    $end   = Get-Date
+    $start = $end.AddMinutes(-([math]::Max(1,$LookbackMinutes)))
+    $trail = New-Object System.Collections.Generic.List[object]
+    foreach ($tgt in @($Targets)) {
+        try {
+            $r = Invoke-AuditQuery -ComputerName $tgt -EventIds 4740,4771,4625,4768,4776 `
+                    -Start $start -End $end -UserFilter "*$User*" -MaxEvents 50000 -Credential $Credential
+        } catch { continue }
+        foreach ($x in @($r)) {
+            $ip = "$($x.SourceIP)" -replace '^::ffff:',''
+            $hostName = $x.SourceHost
+            if (-not $hostName -and $ip -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                if (-not $DnsCache.ContainsKey($ip)) {
+                    $h = $null
+                    try { $h = [System.Net.Dns]::GetHostEntry($ip).HostName } catch {}
+                    $DnsCache[$ip] = $h
+                }
+                if ($DnsCache[$ip]) { $hostName = $DnsCache[$ip] }
+            }
+            $trail.Add([pscustomobject]@{
+                LockoutTime  = if ($x.EventId -eq 4740) { $x.TimeStr } else { '' }
+                Time         = $x.Time
+                FailureTime  = $x.TimeStr
+                EventId      = $x.EventId
+                Kind         = $x.Category
+                User         = $x.User
+                ClientIP     = $ip
+                ClientHost   = $hostName
+                FailureCode  = $x.FailureCode
+                FailureReason= if ($x.FailureReason) { $x.FailureReason } else { $x.Reason }
+                DcLogged     = $x.LoggedOn
+            })
+        }
+    }
+    return @($trail | Sort-Object Time -Descending)
+}
+
+#endregion
+
 #region --------------------------------------------------------------- CLI mode
 
 if ($Cli) {
-    Write-Host "WinLogonAuditor (CLI) - target: $Target  user: $User  window: ${Hours}h" -ForegroundColor Cyan
+    $cfg0   = Get-AuditConfig
+    $maxN0  = if ($MaxEvents -gt 0) { $MaxEvents } else { [int]$cfg0.MaxEventsPerCategory }
+    $exU    = @($ExcludeUsers)   + @($cfg0.Excludes.Users)
+    $exS    = @($ExcludeSources) + @($cfg0.Excludes.Sources)
+    $exObj  = [pscustomobject]@{ Users=$exU; Sources=$exS; DCs=@($cfg0.Excludes.DCs) }
+
+    if ($WatchMode) {
+        $wu = if ($WatchUsers) { $WatchUsers } else { @($cfg0.WatchUsers) }
+        $iv = [int]$cfg0.WatchInterval; if ($iv -lt 5) { $iv = 30 }
+        $hist = Join-Path $Script:ConfigDir ("LockoutHunt_{0}.csv" -f (Get-Date -Format yyyyMMdd))
+        Write-Host "WinLogonAuditor WATCH - target $Target - users [$($wu -join ', ')] - every ${iv}s. Ctrl+C to stop." -ForegroundColor Cyan
+        $seen = @{}; $dns = @{}
+        while ($true) {
+            foreach ($u in @($wu)) {
+                $tr = Invoke-LockoutTrace -Targets @($Target) -User $u -LookbackMinutes $cfg0.LookbackMinutes -DnsCache $dns
+                $newLocks = @($tr | Where-Object { $_.EventId -eq 4740 -and -not $seen.ContainsKey("$($_.FailureTime)|$($_.User)") })
+                foreach ($lk in $newLocks) {
+                    $seen["$($lk.FailureTime)|$($lk.User)"] = $true
+                    $tr | Export-Csv -Path $hist -NoTypeInformation -Encoding UTF8 -Append
+                    Write-Host ("[{0}] LOCKOUT {1} - see {2}" -f $lk.FailureTime, $lk.User, $hist) -ForegroundColor Yellow
+                }
+            }
+            Start-Sleep -Seconds $iv
+        }
+        return
+    }
+
+    Write-Host "WinLogonAuditor (CLI) - target: $Target  user: $User  window: ${Hours}h  max: $maxN0" -ForegroundColor Cyan
     $allIds = $Script:SecurityIds + $Script:SystemIds
     $res = Invoke-AuditQuery -ComputerName $Target -EventIds $allIds `
-              -Start (Get-Date).AddHours(-$Hours) -End (Get-Date) -UserFilter $User -MaxEvents 20000
-    $res | Select-Object TimeStr,EventId,Result,Category,User,Domain,SourceHost,SourceIP,LogonType,Reason,LoggedOn |
-        Export-Csv -Path $OutFile -NoTypeInformation -Encoding UTF8
-    Write-Host ("{0} events written to {1}" -f $res.Count, $OutFile) -ForegroundColor Green
-    $res | Group-Object Category | Sort-Object Count -Descending |
+              -Start (Get-Date).AddHours(-$Hours) -End (Get-Date) -UserFilter $User -MaxEvents $maxN0
+    $kept = @($res | Where-Object { -not (Test-RowExcluded $_ $exObj) })
+    $dropped = $res.Count - $kept.Count
+    $outPath = if ($dropped -gt 0) { [IO.Path]::ChangeExtension($OutFile,$null).TrimEnd('.') + '_filtered.csv' } else { $OutFile }
+    Export-AuditCsv -Rows $kept -Path $outPath
+    Write-Host ("{0} events written to {1} ({2} excluded)" -f $kept.Count, $outPath, $dropped) -ForegroundColor Green
+    $kept | Group-Object Category | Sort-Object Count -Descending |
         Select-Object Count,Name | Format-Table -AutoSize
     return
 }
@@ -425,7 +625,7 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA' -and
     return
 }
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -473,22 +673,30 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
         </ComboBox>
         <DatePicker x:Name="DtFrom" Width="120" Margin="0,0,4,0" IsEnabled="False"/>
         <DatePicker x:Name="DtTo" Width="120" Margin="0,0,14,0" IsEnabled="False"/>
-        <TextBlock Text="Max:" Margin="0,0,6,0"/>
-        <TextBox x:Name="TxtMax" Width="60" Text="2000" Margin="0,0,10,0"
-                 ToolTip="Max events per DC. Lower = faster across many DCs."/>
+        <TextBlock Text="Max events/DC:" Margin="0,0,6,0"/>
+        <TextBox x:Name="TxtMax" Width="75" Text="100000" Margin="0,0,10,0"
+                 ToolTip="Cap per DC (applied per domain controller, not in aggregate)."/>
         <TextBlock Text="Timeout/DC (s):" Margin="0,0,6,0"/>
         <TextBox x:Name="TxtTimeout" Width="50" Text="45" Margin="0,0,14,0"
                  ToolTip="If a DC takes longer than this it is skipped so the rest still return."/>
         <CheckBox x:Name="ChkCred" Content="Alt credentials"/>
         <Button x:Name="BtnQuery" Content="Run Query"/>
         <Button x:Name="BtnExport" Content="Export CSV" Background="#FF6B7280"/>
+        <Button x:Name="BtnExcludes" Content="Excludes..." Background="#FF6B7280"/>
         <CheckBox x:Name="ChkAuto" Content="Auto-refresh 60s"/>
+        <CheckBox x:Name="ChkWatch" Content="Watch" ToolTip="Continuously poll for new lockouts of watched users and toast/log them."/>
       </WrapPanel>
     </Border>
 
-    <!-- Category filters -->
+    <!-- Category filters + warning banner -->
     <Border Grid.Row="1" Background="#FF272739" CornerRadius="6" Padding="8" Margin="0,0,0,8">
-      <WrapPanel x:Name="PnlCats"/>
+      <StackPanel>
+        <WrapPanel x:Name="PnlCats"/>
+        <Border x:Name="WarnBanner" Visibility="Collapsed" Background="#FF7A3B12"
+                CornerRadius="4" Padding="8,5" Margin="0,8,0,0">
+          <TextBlock x:Name="TxtWarn" Foreground="#FFFFD9A8" TextWrapping="Wrap"/>
+        </Border>
+      </StackPanel>
     </Border>
 
     <!-- Tabs -->
@@ -528,24 +736,47 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 
       <TabItem Header="Lockout Investigator">
         <Grid Margin="6">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="160"/><RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
           <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
             <TextBlock Text="Locked user:" Margin="0,0,6,0"/>
-            <TextBox x:Name="TxtLockUser" Width="180" Margin="0,0,10,0"/>
+            <TextBox x:Name="TxtLockUser" Width="170" Margin="0,0,10,0"/>
+            <TextBlock Text="Lookback (min):" Margin="0,0,6,0"/>
+            <TextBox x:Name="TxtLookback" Width="60" Text="60" Margin="0,0,10,0"/>
             <Button x:Name="BtnLockGo" Content="Trace lockout source"/>
-            <TextBlock x:Name="TxtLockInfo" Margin="14,0,0,0" Foreground="#FFFFC857"/>
+            <TextBlock Text="(queries the selected target/all-DCs live)" Margin="12,0,0,0" Foreground="#FF8A8FB0"/>
           </StackPanel>
-          <DataGrid x:Name="GridLock" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+          <Border Grid.Row="1" Background="#FF272739" CornerRadius="4" Padding="8" Margin="0,0,0,8">
+            <TextBlock x:Name="TxtLockInfo" Foreground="#FFFFC857" TextWrapping="Wrap"
+                       Text="Enter a locked username and click Trace. Pulls 4740 + the preceding 4771/4625/4776 trail, resolves source IPs to hostnames, and ranks the offending sources."/>
+          </Border>
+          <TextBlock Grid.Row="2" Text="Offending sources (ranked):" Margin="0,0,0,4" FontWeight="SemiBold"/>
+          <DataGrid x:Name="GridLockSrc" Grid.Row="3" AutoGenerateColumns="False" IsReadOnly="True"
                     Background="#FF1E1E2E" Foreground="#FFE6E6E6" RowBackground="#FF252536"
                     AlternatingRowBackground="#FF2A2A3C" HeadersVisibility="Column">
             <DataGrid.Columns>
-              <DataGridTextColumn Header="Time" Binding="{Binding TimeStr}" Width="140"/>
+              <DataGridTextColumn Header="Source (host / IP)" Binding="{Binding Src}" Width="320"/>
+              <DataGridTextColumn Header="Bad attempts" Binding="{Binding Count}" Width="110"/>
+              <DataGridTextColumn Header="Lockouts" Binding="{Binding Locks}" Width="90"/>
+              <DataGridTextColumn Header="Typical failure" Binding="{Binding Why}" Width="320"/>
+              <DataGridTextColumn Header="Last seen" Binding="{Binding LastStr}" Width="150"/>
+            </DataGrid.Columns>
+          </DataGrid>
+          <DataGrid x:Name="GridLock" Grid.Row="4" Margin="0,8,0,0" AutoGenerateColumns="False" IsReadOnly="True"
+                    Background="#FF1E1E2E" Foreground="#FFE6E6E6" RowBackground="#FF252536"
+                    AlternatingRowBackground="#FF2A2A3C" HeadersVisibility="Column">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Time" Binding="{Binding FailureTime}" Width="140"/>
               <DataGridTextColumn Header="ID" Binding="{Binding EventId}" Width="55"/>
-              <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="200"/>
-              <DataGridTextColumn Header="User" Binding="{Binding User}" Width="140"/>
-              <DataGridTextColumn Header="Source Host" Binding="{Binding SourceHost}" Width="150"/>
-              <DataGridTextColumn Header="Source IP" Binding="{Binding SourceIP}" Width="130"/>
-              <DataGridTextColumn Header="Reason / Detail" Binding="{Binding Reason}" Width="320"/>
+              <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="190"/>
+              <DataGridTextColumn Header="User" Binding="{Binding User}" Width="130"/>
+              <DataGridTextColumn Header="Client Host" Binding="{Binding ClientHost}" Width="170"/>
+              <DataGridTextColumn Header="Client IP" Binding="{Binding ClientIP}" Width="120"/>
+              <DataGridTextColumn Header="Code" Binding="{Binding FailureCode}" Width="80"/>
+              <DataGridTextColumn Header="Failure reason" Binding="{Binding FailureReason}" Width="260"/>
+              <DataGridTextColumn Header="DC" Binding="{Binding DcLogged}" Width="120"/>
             </DataGrid.Columns>
           </DataGrid>
         </Grid>
@@ -635,6 +866,24 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $Script:Win    = [Windows.Markup.XamlReader]::Load($reader)
 
+# Title-bar / taskbar icon. As a .ps1 we load assets\winlogonauditor.ico;
+# packaged as .exe we lift the icon embedded by PS2EXE (-iconFile).
+try {
+    $icoStream = $null
+    $icoPath = Join-Path (Split-Path (Split-Path $PSCommandPath -Parent) -Parent) 'assets\winlogonauditor.ico'
+    if ($PSCommandPath -and (Test-Path -LiteralPath $icoPath)) {
+        $icoStream = [System.IO.File]::OpenRead($icoPath)
+    } else {
+        $exe = (Get-Process -Id $PID).Path
+        $ic  = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+        if ($ic) { $ms = New-Object System.IO.MemoryStream; $ic.ToBitmap().Save($ms,[System.Drawing.Imaging.ImageFormat]::Png); $ms.Position=0; $icoStream=$ms }
+    }
+    if ($icoStream) {
+        $Script:Win.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create(
+            $icoStream, 'OnLoad', 'Default')
+    }
+} catch {}
+
 # Resolve named controls
 $Script:ctl = @{}
 $xaml.SelectNodes("//*[@*[local-name()='Name']]") | ForEach-Object {
@@ -680,6 +929,25 @@ function Invoke-Safe {
     }
 }
 
+# Tray notifier for Watch-mode toasts (no external deps; PS2EXE-safe)
+$Script:Notify = $null
+function Show-Toast {
+    param([string]$Title='WinLogonAuditor', [string]$Message)
+    try {
+        if (-not $Script:Notify) {
+            $Script:Notify = New-Object System.Windows.Forms.NotifyIcon
+            try {
+                $exe = (Get-Process -Id $PID).Path
+                $Script:Notify.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+            } catch { $Script:Notify.Icon = [System.Drawing.SystemIcons]::Information }
+            $Script:Notify.Visible = $true
+        }
+        $Script:Notify.BalloonTipTitle = $Title
+        $Script:Notify.BalloonTipText  = $Message
+        $Script:Notify.ShowBalloonTip(8000)
+    } catch {}
+}
+
 # Load saved config and populate the target dropdown
 $Script:Config = Get-AuditConfig
 
@@ -701,10 +969,12 @@ $initialTarget = if ($Script:Config.LastTarget) { $Script:Config.LastTarget }
                  else { $env:COMPUTERNAME }
 $Script:ctl.CmbTarget.Text  = $initialTarget
 $Script:ctl.ChkAllDc.IsChecked = [bool]$Script:Config.QueryAllDcs
+$Script:ctl.TxtMax.Text = "$([int]$Script:Config.MaxEventsPerCategory)"
 
 # Shared state for the background runspace
-$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Prog=0; Error=$null })
+$Script:Sync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Rows=$null; Views=$null; Status=''; Prog=0; Error=$null; Capped=$false; Excluded=0 })
 $Script:AllRows = @()
+$Script:DnsCache = @{}
 
 function Get-SelectedIds {
     $ids = @()
@@ -742,9 +1012,11 @@ function Start-Audit {
     }
     if (-not $Script:ctl.ChkCred.IsChecked) { $Script:Cred = $null }
 
-    $maxN = 2000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
+    $maxN = 100000; [int]::TryParse($Script:ctl.TxtMax.Text, [ref]$maxN) | Out-Null
+    if ($maxN -le 0) { $maxN = 100000 }
     $toN  = 45;   [int]::TryParse($Script:ctl.TxtTimeout.Text, [ref]$toN) | Out-Null
     if ($toN -lt 5) { $toN = 5 }
+    $Script:Config.MaxEventsPerCategory = $maxN
 
     $allDc = [bool]$Script:ctl.ChkAllDc.IsChecked
     $typed = $Script:ctl.CmbTarget.Text.Trim()
@@ -767,6 +1039,7 @@ function Start-Audit {
         MaxEvents  = $maxN
         TimeoutSec = $toN
         Credential = $Script:Cred
+        Excludes   = $Script:Config.Excludes
     }
 
     $Script:Sync.Running  = $true
@@ -792,7 +1065,7 @@ function Start-Audit {
     $rs.SessionStateProxy.SetVariable('funcDefs',
         "${function:ConvertTo-AuditRow}|||${function:Invoke-AuditQuery}|||" +
         "${function:Get-DecodedStatus}|||${function:Get-DecodedKerb}|||${function:Get-DecodedLogonType}|||" +
-        "${function:Get-DomainControllerList}")
+        "${function:Get-DomainControllerList}|||${function:Test-MatchAny}|||${function:Test-RowExcluded}")
     $rs.SessionStateProxy.SetVariable('maps', @{
         LogonTypeMap=$Script:LogonTypeMap; StatusMap=$Script:StatusMap; KerbMap=$Script:KerbMap
         CategoryMap=$Script:CategoryMap; SecurityIds=$Script:SecurityIds; SystemIds=$Script:SystemIds })
@@ -809,6 +1082,8 @@ function Start-Audit {
             Set-Item function:Get-DecodedKerb          ([scriptblock]::Create($parts[3]))
             Set-Item function:Get-DecodedLogonType     ([scriptblock]::Create($parts[4]))
             Set-Item function:Get-DomainControllerList ([scriptblock]::Create($parts[5]))
+            Set-Item function:Test-MatchAny            ([scriptblock]::Create($parts[6]))
+            Set-Item function:Test-RowExcluded         ([scriptblock]::Create($parts[7]))
 
             # Resolve targets off the UI thread
             if ($qa.AllDcs) {
@@ -844,10 +1119,11 @@ function Start-Audit {
                     Set-Item function:Get-DecodedStatus    ([scriptblock]::Create($p[2]))
                     Set-Item function:Get-DecodedKerb      ([scriptblock]::Create($p[3]))
                     Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($p[4]))
+                    $cap = $false
                     $r = Invoke-AuditQuery -ComputerName $tgt -EventIds $qa.EventIds `
                             -Start $qa.Start -End $qa.End -UserFilter $qa.UserFilter `
-                            -MaxEvents $qa.MaxEvents -Credential $qa.Credential
-                    $slot.Rows = @($r); $slot.Ok = $true
+                            -MaxEvents $qa.MaxEvents -Credential $qa.Credential -Capped ([ref]$cap)
+                    $slot.Rows = @($r); $slot.Ok = $true; $slot.Capped = $cap
                 } catch { $slot.Err = $_.Exception.Message }
                 finally { $slot.Done = $true }
             }
@@ -855,6 +1131,7 @@ function Start-Audit {
             $queue   = [System.Collections.Queue]::new(@($targets))
             $jobs    = New-Object System.Collections.Generic.List[object]
             $doneCnt = 0
+            $anyCapped = $false
             $sync.Status = "Querying $n server(s) in parallel (timeout ${toSec}s each)..."
             $sync.Prog   = 6
 
@@ -862,7 +1139,7 @@ function Start-Audit {
                 # Launch up to $maxConc concurrent DC queries
                 while ($queue.Count -gt 0 -and @($jobs | Where-Object { -not $_.Closed }).Count -lt $maxConc) {
                     $tgt  = $queue.Dequeue()
-                    $slot = [hashtable]::Synchronized(@{ Done=$false; Ok=$false; Rows=@(); Err=$null })
+                    $slot = [hashtable]::Synchronized(@{ Done=$false; Ok=$false; Rows=@(); Err=$null; Capped=$false })
                     $crs  = [runspacefactory]::CreateRunspace(); $crs.ThreadOptions='ReuseThread'; $crs.Open()
                     $cps  = [powershell]::Create(); $cps.Runspace = $crs
                     $cps.AddScript($childScript).AddArgument($maps).AddArgument($funcDefs).
@@ -875,7 +1152,10 @@ function Start-Audit {
                     if ($j.Closed) { continue }
                     $el = ([datetime]::Now - $j.Start).TotalSeconds
                     if ($j.Slot.Done) {
-                        if ($j.Slot.Ok) { foreach ($x in @($j.Slot.Rows)) { $all.Add($x) } }
+                        if ($j.Slot.Ok) {
+                            foreach ($x in @($j.Slot.Rows)) { $all.Add($x) }
+                            if ($j.Slot.Capped) { $anyCapped = $true }
+                        }
                         else { $errs += "[$($j.Tgt)] $($j.Slot.Err)" }
                         try { $j.PS.EndInvoke($j.H) | Out-Null } catch {}
                         try { $j.PS.Dispose(); $j.RS.Close() } catch {}
@@ -895,7 +1175,17 @@ function Start-Audit {
             }
             $sync.Status = "Sorting & summarising $($all.Count) events..."
             $sync.Prog   = 96
+            $rawCount = $all.Count
             $rows = @($all | Sort-Object Time -Descending)
+
+            # --- Apply exclude lists (Feature 2), post-retrieval ---
+            if ($qa.Excludes) {
+                $kept = New-Object System.Collections.Generic.List[object]
+                foreach ($x in $rows) { if (-not (Test-RowExcluded $x $qa.Excludes)) { $kept.Add($x) } }
+                $sync.Excluded = $rawCount - $kept.Count
+                $rows = @($kept)
+            } else { $sync.Excluded = 0 }
+            $sync.Capped = [bool]$anyCapped
 
             # --- Correlate 4740 lockouts to what actually locked them ---
             # Windows often logs 4740 with no Caller Computer Name for
@@ -1019,6 +1309,20 @@ function Update-Views {
         $Script:ctl.GridSumSrc.ItemsSource  = $v.Src
         $Script:ctl.GridOut.ItemsSource     = $v.ByUser
     }
+    # Warning banner: cap reached and/or excludes active
+    $w = @()
+    if ($Script:Sync.Capped) {
+        $w += "Reached the per-DC cap of $($Script:Config.MaxEventsPerCategory) events - increase 'Max events/DC' or narrow the time range; results are the most recent within the window."
+    }
+    if ([int]$Script:Sync.Excluded -gt 0) {
+        $w += "$($Script:Sync.Excluded) event(s) hidden by exclude lists."
+    }
+    if ($w) {
+        $Script:ctl.TxtWarn.Text = ($w -join '  ')
+        $Script:ctl.WarnBanner.Visibility = 'Visible'
+    } else {
+        $Script:ctl.WarnBanner.Visibility = 'Collapsed'
+    }
 }
 
 function Apply-Filter {
@@ -1031,7 +1335,9 @@ function Apply-Filter {
     }
     $Script:ctl.Grid.ItemsSource = @($view)
     $tgtLbl = if ($Script:ctl.ChkAllDc.IsChecked) { 'all DCs' } else { $Script:ctl.CmbTarget.Text }
-    $Script:ctl.TxtStatus.Text = "{0} events  |  target {1}  |  {2}" -f @($view).Count, $tgtLbl, (Get-Date -Format 'HH:mm:ss')
+    $exTxt  = if ([int]$Script:Sync.Excluded -gt 0) { "  |  $($Script:Sync.Excluded) excluded" } else { '' }
+    $capTxt = if ($Script:Sync.Capped) { '  |  CAP HIT' } else { '' }
+    $Script:ctl.TxtStatus.Text = "{0} events  |  target {1}{2}{3}  |  {4}" -f @($view).Count, $tgtLbl, $exTxt, $capTxt, (Get-Date -Format 'HH:mm:ss')
 }
 
 # --- Events / wiring ---
@@ -1112,56 +1418,178 @@ $Script:ctl.BtnManage.Add_Click({
     $mw.ShowDialog() | Out-Null
 })
 
+$Script:ctl.BtnExcludes.Add_Click({ Invoke-Safe {
+    [xml]$ex = @"
+<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Title='Exclude lists (wildcards: svc-*  192.168.108.*  *$)' Height='460' Width='640'
+        WindowStartupLocation='CenterOwner' Background='#FF1E1E2E'>
+  <Grid Margin='12'>
+    <Grid.RowDefinitions><RowDefinition Height='Auto'/><RowDefinition Height='*'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>
+    <TextBlock Grid.Row='0' Foreground='#FFB8C0FF' TextWrapping='Wrap' Margin='0,0,0,8'
+      Text='One pattern per line. Users match the account; Sources match source host OR IP; DCs match the logging DC. Applies on the next Run Query / Watch poll.'/>
+    <Grid Grid.Row='1'>
+      <Grid.ColumnDefinitions><ColumnDefinition Width='*'/><ColumnDefinition Width='*'/><ColumnDefinition Width='*'/></Grid.ColumnDefinitions>
+      <DockPanel Grid.Column='0' Margin='0,0,6,0'><TextBlock DockPanel.Dock='Top' Text='Users' Foreground='#FFE6E6E6'/><TextBox x:Name='ExU' AcceptsReturn='True' VerticalScrollBarVisibility='Auto' Background='#FF252536' Foreground='#FFE6E6E6'/></DockPanel>
+      <DockPanel Grid.Column='1' Margin='3,0'><TextBlock DockPanel.Dock='Top' Text='Sources (host/IP)' Foreground='#FFE6E6E6'/><TextBox x:Name='ExS' AcceptsReturn='True' VerticalScrollBarVisibility='Auto' Background='#FF252536' Foreground='#FFE6E6E6'/></DockPanel>
+      <DockPanel Grid.Column='2' Margin='6,0,0,0'><TextBlock DockPanel.Dock='Top' Text='DCs' Foreground='#FFE6E6E6'/><TextBox x:Name='ExD' AcceptsReturn='True' VerticalScrollBarVisibility='Auto' Background='#FF252536' Foreground='#FFE6E6E6'/></DockPanel>
+    </Grid>
+    <Button x:Name='ExOk' Grid.Row='2' Content='Save' Background='#FF3B82F6' Foreground='White' Padding='12,6' HorizontalAlignment='Right' Margin='0,10,0,0'/>
+  </Grid>
+</Window>
+"@
+    $ew = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $ex))
+    $ew.Owner = $Script:Win
+    $ew.FindName('ExU').Text = (@($Script:Config.Excludes.Users)   -join "`r`n")
+    $ew.FindName('ExS').Text = (@($Script:Config.Excludes.Sources) -join "`r`n")
+    $ew.FindName('ExD').Text = (@($Script:Config.Excludes.DCs)     -join "`r`n")
+    $ew.FindName('ExOk').Add_Click({
+        $split = { param($t) @($t -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+        $Script:Config.Excludes = New-ExcludesObject ([pscustomobject]@{
+            Users   = (& $split $ew.FindName('ExU').Text)
+            Sources = (& $split $ew.FindName('ExS').Text)
+            DCs     = (& $split $ew.FindName('ExD').Text)
+        })
+        Save-AuditConfig $Script:Config
+        $Script:ctl.TxtStatus.Text = 'Exclude lists saved - applied on next Run Query.'
+        $ew.Close()
+    })
+    $ew.ShowDialog() | Out-Null
+} 'Excludes' })
+
+# Right-click any grid row to quick-mute its user / source
+function Add-Exclude {
+    param([ValidateSet('Users','Sources','DCs')]$List, [string]$Value)
+    if (-not $Value) { return }
+    $cur = @($Script:Config.Excludes.$List)
+    if ($cur -notcontains $Value) {
+        $obj = @{ Users=@($Script:Config.Excludes.Users); Sources=@($Script:Config.Excludes.Sources); DCs=@($Script:Config.Excludes.DCs) }
+        $obj.$List = @($cur + $Value)
+        $Script:Config.Excludes = New-ExcludesObject ([pscustomobject]$obj)
+        Save-AuditConfig $Script:Config
+    }
+    # Drop matching rows from the current view immediately
+    $Script:AllRows = @($Script:AllRows | Where-Object { -not (Test-RowExcluded $_ $Script:Config.Excludes) })
+    $Script:Sync.Excluded = [int]$Script:Sync.Excluded + 1
+    Apply-Filter
+    $Script:ctl.TxtStatus.Text = "Muted $List = '$Value' (saved). Re-run query for full effect."
+}
+$Script:GridMenu = New-Object System.Windows.Controls.ContextMenu
+$miU = New-Object System.Windows.Controls.MenuItem; $miU.Header = 'Mute this user'
+$miH = New-Object System.Windows.Controls.MenuItem; $miH.Header = 'Mute this source host'
+$miI = New-Object System.Windows.Controls.MenuItem; $miI.Header = 'Mute this source IP'
+$miU.Add_Click({ $r=$Script:ctl.Grid.SelectedItem; if ($r -and $r.User)       { Add-Exclude Users   $r.User } })
+$miH.Add_Click({ $r=$Script:ctl.Grid.SelectedItem; if ($r -and $r.SourceHost) { Add-Exclude Sources $r.SourceHost } })
+$miI.Add_Click({ $r=$Script:ctl.Grid.SelectedItem; if ($r -and $r.SourceIP)   { Add-Exclude Sources ($r.SourceIP -replace ' \(local\)$','') } })
+$Script:GridMenu.Items.Add($miU) | Out-Null
+$Script:GridMenu.Items.Add($miH) | Out-Null
+$Script:GridMenu.Items.Add($miI) | Out-Null
+$Script:ctl.Grid.ContextMenu = $Script:GridMenu
+
 $Script:ctl.TxtFilter.Add_TextChanged({ Apply-Filter })
 $Script:ctl.Grid.Add_SelectionChanged({
     $sel = $Script:ctl.Grid.SelectedItem
     if ($sel) { $Script:ctl.TxtDetail.Text = $sel.Message }
 })
-$Script:ctl.BtnExport.Add_Click({
+$Script:ctl.BtnExport.Add_Click({ Invoke-Safe {
     if (-not $Script:AllRows) { $Script:ctl.TxtStatus.Text='Nothing to export - run a query first.'; return }
+    $filtered = [int]$Script:Sync.Excluded -gt 0
+    $base = "WinLogonAuditor_$(Get-Date -Format yyyyMMdd_HHmmss)"
+    if ($filtered) { $base += '_filtered' }
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
-    $dlg.Filter='CSV (*.csv)|*.csv'; $dlg.FileName="WinLogonAuditor_$(Get-Date -Format yyyyMMdd_HHmmss).csv"
+    $dlg.Filter='CSV (*.csv)|*.csv'; $dlg.FileName="$base.csv"
     if ($dlg.ShowDialog() -eq 'OK') {
-        $Script:AllRows | Select-Object TimeStr,EventId,Result,Category,User,Domain,SourceHost,SourceIP,LogonType,Reason,LoggedOn |
-            Export-Csv -Path $dlg.FileName -NoTypeInformation -Encoding UTF8
+        Export-AuditCsv -Rows $Script:AllRows -Path $dlg.FileName
         $Script:ctl.TxtStatus.Text = "Exported $(@($Script:AllRows).Count) rows to $($dlg.FileName)"
     }
-})
-$Script:ctl.BtnLockGo.Add_Click({
-    $u = $Script:ctl.TxtLockUser.Text.Trim()
-    if (-not $u) { $Script:ctl.TxtLockInfo.Text='Enter a username.'; return }
-    $rows = $Script:AllRows | Where-Object {
-        $_.User -like "*$u*" -and $_.EventId -in 4740,4625,4771,4768,4776,4624
-    } | Sort-Object Time -Descending
-    $Script:ctl.GridLock.ItemsSource = @($rows)
-    $locks = @($rows | Where-Object EventId -eq 4740)
-    $fails = @($rows | Where-Object EventId -in 4625,4771,4776)
-    if (-not $locks) {
-        $Script:ctl.TxtLockInfo.Text = "No 4740 for '*$u*' in current data. Tick 'Account lockouts (4740)' and widen the range, then Run Query."
+} 'Export' })
+function Resolve-TraceTargets {
+    if ($Script:ctl.ChkAllDc.IsChecked) {
+        $dc = Get-DomainControllerList -Credential $Script:Cred
+        if ($dc.DCs) { return @($dc.DCs) }
+    }
+    $t = $Script:ctl.CmbTarget.Text.Trim()
+    if ($t) { return @($t) } else { return @($env:COMPUTERNAME) }
+}
+
+# Render the trace result (shared by manual Trace and Watch mode)
+function Show-LockTrace {
+    param([string]$User, $Trail)
+    $Script:ctl.GridLock.ItemsSource = @($Trail)
+    $locks = @($Trail | Where-Object { $_.EventId -eq 4740 })
+    $fails = @($Trail | Where-Object { $_.EventId -in 4625,4771,4776 })
+    $bySrc = $fails | Group-Object { if ($_.ClientHost) { $_.ClientHost } elseif ($_.ClientIP) { $_.ClientIP } else { '(unknown)' } } |
+        ForEach-Object {
+            $g = $_.Group
+            [pscustomobject]@{
+                Src     = $_.Name
+                Count   = $_.Count
+                Locks   = @($locks | Where-Object { ($_.ClientHost -eq $g[0].ClientHost) -or ($_.ClientIP -eq $g[0].ClientIP) }).Count
+                Why     = ($g | Group-Object FailureReason | Sort-Object Count -Descending | Select-Object -First 1).Name
+                Last    = ($g | Sort-Object Time -Descending | Select-Object -First 1).Time
+                LastStr = ($g | Sort-Object Time -Descending | Select-Object -First 1).FailureTime
+            }
+        } | Sort-Object Count -Descending
+    $Script:ctl.GridLockSrc.ItemsSource = @($bySrc)
+    $top = $bySrc | Select-Object -First 1
+    if (-not $locks -and -not $fails) {
+        $Script:ctl.TxtLockInfo.Text = "No 4740/4771/4625/4776 for '*$User*' in the last $($Script:ctl.TxtLookback.Text) min on the selected target(s). Widen Lookback or check the target."
         return
     }
-    # Where are the bad attempts coming from? Rank sources.
-    $srcGroups = $fails | ForEach-Object {
-        if ($_.SourceHost) { $_.SourceHost } elseif ($_.SourceIP) { $_.SourceIP } else { '(unknown)' }
-    } | Group-Object | Sort-Object Count -Descending
-    $top = $srcGroups | Select-Object -First 1
-    $lastLock = $locks | Select-Object -First 1
-    $lastFail = $fails | Select-Object -First 1
-    $verdict = "VERDICT: '$u' locked $($locks.Count)x. "
+    $v = "VERDICT: '$User' - $($locks.Count) lockout(s), $($fails.Count) bad attempt(s) in last $($Script:ctl.TxtLookback.Text) min. "
     if ($top) {
-        $verdict += "Bad attempts come mainly from $($top.Name) ($($top.Count) hits"
-        if ($lastFail) {
-            if ($lastFail.LogonType) { $verdict += ", $($lastFail.LogonType)" }
-            if ($lastFail.AuthPkg)   { $verdict += ", $($lastFail.AuthPkg)" }
-            if ($lastFail.Process -and $lastFail.Process -ne '-') { $verdict += ", proc $($lastFail.Process)" }
-        }
-        $verdict += "). Investigate that host/service (stale creds: mapped drive, service, scheduled task, RDP, cached password)."
+        $v += "Top source: $($top.Src) ($($top.Count) hits; $($top.Why)). Investigate that device/service - stale creds in a mapped drive, Windows service, scheduled task, RDP session or cached password."
     } else {
-        $verdict += "No 4625/4776/4771 in current data - tick 'Failed logons (4625)' and 'NTLM validation (4776)', then Run Query to reveal the source."
+        $v += "Lockouts present but no preceding failures captured - tick NTLM validation (4776) categories or widen Lookback."
     }
-    $verdict += "  Most recent lockout: $($lastLock.Reason)"
-    $Script:ctl.TxtLockInfo.Text = $verdict
-})
+    $Script:ctl.TxtLockInfo.Text = $v
+}
+
+$Script:LockSync = [hashtable]::Synchronized(@{ Running=$false; Done=$false; Trail=$null; Err=$null; User='' })
+
+$Script:ctl.BtnLockGo.Add_Click({ Invoke-Safe {
+    $u = $Script:ctl.TxtLockUser.Text.Trim()
+    if (-not $u) { $Script:ctl.TxtLockInfo.Text='Enter a username.'; return }
+    if ($Script:LockSync.Running) { return }
+    $lb = 60; [int]::TryParse($Script:ctl.TxtLookback.Text, [ref]$lb) | Out-Null; if ($lb -lt 1) { $lb = 60 }
+    if ($Script:ctl.ChkCred.IsChecked -and -not $Script:Cred) {
+        $Script:Cred = Get-Credential -Message "Domain credentials for lockout trace"
+    }
+    $targets = Resolve-TraceTargets
+    $Script:ctl.TxtLockInfo.Text = "Tracing '$u' across $($targets -join ', ') (last $lb min)..."
+    $Script:LockSync.Running = $true; $Script:LockSync.Done = $false
+    $Script:LockSync.Err = $null; $Script:LockSync.User = $u
+    Set-Busy $true
+
+    $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState='STA'; $rs.ThreadOptions='ReuseThread'; $rs.Open()
+    $rs.SessionStateProxy.SetVariable('lsync', $Script:LockSync)
+    $rs.SessionStateProxy.SetVariable('lt', @{ Targets=$targets; User=$u; Lb=$lb; Cred=$Script:Cred })
+    $rs.SessionStateProxy.SetVariable('fd',
+        "${function:ConvertTo-AuditRow}|||${function:Invoke-AuditQuery}|||${function:Get-DecodedStatus}|||" +
+        "${function:Get-DecodedKerb}|||${function:Get-DecodedLogonType}|||${function:Invoke-LockoutTrace}")
+    $rs.SessionStateProxy.SetVariable('maps', @{
+        LogonTypeMap=$Script:LogonTypeMap; StatusMap=$Script:StatusMap; KerbMap=$Script:KerbMap
+        CategoryMap=$Script:CategoryMap; SecurityIds=$Script:SecurityIds; SystemIds=$Script:SystemIds })
+    $w = {
+        try {
+            $Script:LogonTypeMap=$maps.LogonTypeMap;$Script:StatusMap=$maps.StatusMap
+            $Script:KerbMap=$maps.KerbMap;$Script:CategoryMap=$maps.CategoryMap
+            $Script:SecurityIds=$maps.SecurityIds;$Script:SystemIds=$maps.SystemIds
+            $p=$fd -split '\|\|\|'
+            Set-Item function:ConvertTo-AuditRow   ([scriptblock]::Create($p[0]))
+            Set-Item function:Invoke-AuditQuery    ([scriptblock]::Create($p[1]))
+            Set-Item function:Get-DecodedStatus    ([scriptblock]::Create($p[2]))
+            Set-Item function:Get-DecodedKerb      ([scriptblock]::Create($p[3]))
+            Set-Item function:Get-DecodedLogonType ([scriptblock]::Create($p[4]))
+            Set-Item function:Invoke-LockoutTrace  ([scriptblock]::Create($p[5]))
+            $lsync.Trail = @(Invoke-LockoutTrace -Targets $lt.Targets -User $lt.User -LookbackMinutes $lt.Lb -Credential $lt.Cred -DnsCache @{})
+        } catch { $lsync.Err = $_.Exception.Message }
+        finally { $lsync.Done = $true }
+    }
+    $ps=[powershell]::Create(); $ps.Runspace=$rs
+    $ps.AddScript($w) | Out-Null
+    $Script:LockSync.PS=$ps; $Script:LockSync.RS=$rs; $Script:LockSync.Handle=$ps.BeginInvoke()
+} 'Lockout trace' })
 
 # Poll the runspace
 $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -1205,8 +1633,59 @@ $autoTimer.Interval = [TimeSpan]::FromSeconds(60)
 $autoTimer.Add_Tick({ if ($Script:ctl.ChkAuto.IsChecked -and -not $Script:Sync.Running) { Invoke-Safe { Start-Audit } 'Auto-refresh' } })
 $autoTimer.Start()
 
+# Poll the lockout-trace runspace
+$lockTimer = New-Object System.Windows.Threading.DispatcherTimer
+$lockTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+$lockTimer.Add_Tick({
+    if ($Script:LockSync.Running -and $Script:LockSync.Done) {
+        Invoke-Safe {
+            try { if ($Script:LockSync.PS) { $Script:LockSync.PS.EndInvoke($Script:LockSync.Handle) | Out-Null } } catch {}
+            if ($Script:LockSync.Err) {
+                $Script:ctl.TxtLockInfo.Text = "Trace failed: $($Script:LockSync.Err)"
+            } else {
+                Show-LockTrace -User $Script:LockSync.User -Trail $Script:LockSync.Trail
+            }
+            if ($Script:LockSync.RS) { $Script:LockSync.PS.Dispose(); $Script:LockSync.RS.Close() }
+        } 'Trace result'
+        $Script:LockSync.Running = $false
+        Set-Busy $false
+    }
+})
+$lockTimer.Start()
+
+# Watch mode: poll for new lockouts of watched users and toast + log them
+$Script:WatchSeen = @{}
+$watchTimer = New-Object System.Windows.Threading.DispatcherTimer
+$watchTimer.Interval = [TimeSpan]::FromSeconds([math]::Max(5,[int]$Script:Config.WatchInterval))
+$watchTimer.Add_Tick({ Invoke-Safe {
+    if (-not $Script:ctl.ChkWatch.IsChecked) { return }
+    if ($Script:LockSync.Running -or $Script:Sync.Running) { return }
+    $wu = @($Script:Config.WatchUsers)
+    if (-not $wu) { $wu = @($Script:ctl.TxtLockUser.Text.Trim()) }
+    $wu = @($wu | Where-Object { $_ })
+    if (-not $wu) { return }
+    $targets = Resolve-TraceTargets
+    $hist = Join-Path $Script:ConfigDir ("LockoutHunt_{0}.csv" -f (Get-Date -Format yyyyMMdd))
+    foreach ($u in $wu) {
+        $tr = Invoke-LockoutTrace -Targets $targets -User $u -LookbackMinutes $Script:Config.LookbackMinutes -Credential $Script:Cred -DnsCache $Script:DnsCache
+        $newLocks = @($tr | Where-Object { $_.EventId -eq 4740 -and -not $Script:WatchSeen.ContainsKey("$($_.FailureTime)|$($_.User)") })
+        foreach ($lk in $newLocks) {
+            $Script:WatchSeen["$($lk.FailureTime)|$($lk.User)"] = $true
+            try { $tr | ForEach-Object { ConvertTo-ExportRow $_ } | Export-Csv -Path $hist -NoTypeInformation -Encoding UTF8 -Append } catch {}
+            $src = ($tr | Where-Object { $_.EventId -in 4625,4771,4776 } |
+                    Group-Object { if ($_.ClientHost) { $_.ClientHost } elseif ($_.ClientIP) { $_.ClientIP } else { '?' } } |
+                    Sort-Object Count -Descending | Select-Object -First 1)
+            $msg = "Lockout: $($lk.User)"
+            if ($src) { $msg += " - likely source: $($src.Name) ($($src.Count) bad attempts)" }
+            Show-Toast -Title 'WinLogonAuditor' -Message $msg
+            $Script:ctl.TxtStatus.Text = $msg
+        }
+    }
+} 'Watch' })
+$watchTimer.Start()
+
 $Script:Win.Add_Closed({
-    $timer.Stop(); $autoTimer.Stop()
+    $timer.Stop(); $autoTimer.Stop(); $lockTimer.Stop(); $watchTimer.Stop()
     try {
         $Script:Config.LastTarget  = $Script:ctl.CmbTarget.Text.Trim()
         $Script:Config.QueryAllDcs = [bool]$Script:ctl.ChkAllDc.IsChecked
