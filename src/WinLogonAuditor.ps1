@@ -542,7 +542,7 @@ function Test-RowExcluded {
 
 #region ----------------------------------------------------------- Run logging
 
-$Script:AppVersion = '1.1.10'
+$Script:AppVersion = '1.1.11'
 $Script:LogDir = Join-Path $env:TEMP 'WinLogonAuditor\logs'
 try { if (-not (Test-Path $Script:LogDir)) { New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null } } catch {}
 $Script:RunLog = Join-Path $Script:LogDir ("WinLogonAuditor_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -1374,6 +1374,7 @@ function Start-Audit {
             # NTLM/network lockouts. The real source is the bad-password
             # 4625 / 4776 / 4771 for the same user moments earlier.
             $phase = 'correlate'
+            $sync.Status = "Correlating lockouts ($($rows.Count) events)..."
             $srcByUser = @{}
             foreach ($x in $rows) {
                 if ($x.EventId -in 4625,4776,4771 -and $x.User) {
@@ -1406,20 +1407,44 @@ function Start-Audit {
                 }
             }
 
-            # --- Best-effort reverse DNS for source IPs (cached) ---
+            # --- Best-effort reverse DNS for source IPs ---
+            # Bounded: a non-resolving IP (very common in a spray) would
+            # otherwise block ~5s each on a synchronous GetHostEntry and
+            # hang the whole run. 1s cap per lookup + a hard host/time
+            # budget; anything not resolved just keeps its IP.
             $phase = 'dns'
+            $sync.Status = 'Resolving source hostnames...'
             $dnsCache = @{}
+            $distinctIps = [System.Collections.Generic.List[string]]::new()
+            $seenIp = @{}
             foreach ($x in $rows) {
                 $ip = "$($x.SourceIP)"
-                if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$' -and -not $x.SourceHost) {
-                    if (-not $dnsCache.ContainsKey($ip)) {
-                        $h = $null
-                        try { $h = [System.Net.Dns]::GetHostEntry($ip).HostName } catch {}
-                        $dnsCache[$ip] = $h
-                    }
-                    if ($dnsCache[$ip]) { $x.SourceHost = $dnsCache[$ip] }
+                if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$' -and -not $x.SourceHost -and -not $seenIp.ContainsKey($ip)) {
+                    $seenIp[$ip] = $true; $distinctIps.Add($ip)
                 }
             }
+            $dnsSW = [System.Diagnostics.Stopwatch]::StartNew()
+            $dnsBudgetMs = 12000; $dnsMaxHosts = 75; $dnsDone = 0
+            foreach ($ip in $distinctIps) {
+                if ($dnsDone -ge $dnsMaxHosts -or $dnsSW.ElapsedMilliseconds -gt $dnsBudgetMs) { break }
+                $h = $null
+                try {
+                    $iar = [System.Net.Dns]::BeginGetHostEntry($ip, $null, $null)
+                    if ($iar.AsyncWaitHandle.WaitOne(1000)) {
+                        $h = ([System.Net.Dns]::EndGetHostEntry($iar)).HostName
+                    }
+                } catch {}
+                $dnsCache[$ip] = $h
+                $dnsDone++
+                if (($dnsDone % 10) -eq 0) { $sync.Status = "Resolving source hostnames... ($dnsDone/$($distinctIps.Count))" }
+            }
+            foreach ($x in $rows) {
+                $ip = "$($x.SourceIP)"
+                if (-not $x.SourceHost -and $dnsCache.ContainsKey($ip) -and $dnsCache[$ip]) {
+                    $x.SourceHost = $dnsCache[$ip]
+                }
+            }
+            wlog "dns: resolved $dnsDone/$($distinctIps.Count) distinct IPs in $([int]$dnsSW.Elapsed.TotalSeconds)s"
 
             $sync.Rows = $rows
             if ($errs) {
@@ -1430,6 +1455,7 @@ function Start-Audit {
             # Pre-compute every view here (off the UI thread) using single
             # passes / hashtables, so binding on the UI thread is instant.
             $phase = 'aggregate'
+            $sync.Status = 'Building summaries & displaying...'
             $catC = @{}; $usrF = @{}; $srcF = @{}
             $rebootTotal = 0
             $perUser = @{}   # user -> aggregate hashtable

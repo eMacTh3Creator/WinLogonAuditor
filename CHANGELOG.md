@@ -6,6 +6,18 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Data is retrieved (29k+ events over WinRM, fast) but the run hung at
+  "Sorting & summarising": the post-processing reverse-DNS step did a
+  synchronous Dns.GetHostEntry with no timeout for every unique source
+  IP. A spray produces hundreds of non-resolving IPs at ~5s each =
+  many minutes of apparent hang. Reverse DNS is now bounded: 1s cap
+  per lookup (async BeginGetHostEntry + 1s wait), a 75-host / 12s
+  overall budget, anything unresolved just keeps its IP. Post-process
+  phases now report live progress ("Correlating lockouts...",
+  "Resolving source hostnames... (n/total)", "Building summaries...")
+  so it is never a frozen mystery and Cancel stays responsive.
+
 ## [1.1.10] - 2026-05-19
 
 ### Fixed
