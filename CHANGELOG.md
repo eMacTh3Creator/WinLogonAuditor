@@ -6,6 +6,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-05-19
+
 ### Fixed
 - Performance regression: queries over windows > 24h (e.g. Last 3 days)
   timed out even with a high per-DC timeout. v1.1.0's hourly chunking
@@ -177,7 +179,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - PS2EXE packaging (`build/Build-Exe.ps1`) and tag-driven release
   workflow producing a standalone `WinLogonAuditor.exe`.
 
-[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/eMacTh3Creator/WinLogonAuditor/compare/v1.0.6...v1.1.0
